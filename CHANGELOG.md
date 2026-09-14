@@ -10,6 +10,7 @@
 - 新增 Workbench SQLite Task Registry 初版，支持父子任务、状态机、幂等结果、artifact 和 checkpoint。
 - 新增 WorkbenchBridge 初版，连接 daemon 派发、Agent 绑定和父任务回调通知。
 - 新增声明式 Pattern Runtime 初版，支持人工审批、任务步骤、轮次和 Agent 数量上限。
+- 新增本地 stdio Workbench MCP，向模型暴露任务创建、派发、进度、结果、查询和 checkpoint 工具。
 
 ### 文件浏览器系统剪贴板粘贴
 
