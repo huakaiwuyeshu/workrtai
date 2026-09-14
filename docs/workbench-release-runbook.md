@@ -11,7 +11,7 @@ Workbench 使用 `com.cli-manager.workbench`、`%USERPROFILE%\\.cli-manager-work
 1. `npm run test:daemon-adapter`、`npm run test:daemon-fixture` 验证 NDJSON daemon 生命周期。
 2. `npm run test:task-registry`、`npm run test:workbench-bridge`、`npm run test:workbench-mcp` 验证任务账本、handoff、回调和 MCP。
 3. `npm run test:pattern-runtime`、`npm run test:browser-executor` 验证 DAG、轮次限制和浏览器 artifact。
-4. 工具链可用时执行 `cargo check --manifest-path src-tauri/Cargo.toml` 和 `npm run build`。
+4. 工具链可用时执行 `cargo check --manifest-path src-tauri/Cargo.toml` 和 `npm run build`；浏览器执行器使用 `playwright` 的 Chromium 工厂。
 
 ## 重启恢复
 

@@ -46,6 +46,8 @@ crates/web-protocol/target/
 crates/web-protocol/Cargo.lock
 apps/web/dist
 crates/web-protocol
+!crates/web-protocol/
+!crates/web-protocol/**
 
 prototype/
 .pi

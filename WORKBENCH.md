@@ -14,6 +14,8 @@
 
 ## 本地开发
 
+一键启动：双击仓库根目录的 `启动 Workbench.cmd`。脚本会设置独立数据根、检查 Node/Cargo/MSVC、按需安装依赖、构建前端、启动 MCP 和 Tauri Workbench；退出桌面应用时会自动回收 MCP 进程。
+
 ```powershell
 Set-Location $PSScriptRoot
 npm install
