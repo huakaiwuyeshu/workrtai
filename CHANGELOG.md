@@ -7,6 +7,7 @@
 - 新增独立 Workbench daemon adapter，读取 Workbench 专属 discovery，支持 auth、list、status、create、write、attach、close 和 output/exit/hook_report 事件转发。
 - 增加协议版本校验、Session ID 校验、请求超时、断线清理和 fake-daemon 定向测试；不连接或修改现有 CLI-Manager 数据根。
 - 补齐 status/write/close、exit/hook_report 事件、重连和非法参数测试。
+- 新增 Workbench SQLite Task Registry 初版，支持父子任务、状态机、幂等结果、artifact 和 checkpoint。
 
 ### 文件浏览器系统剪贴板粘贴
 
