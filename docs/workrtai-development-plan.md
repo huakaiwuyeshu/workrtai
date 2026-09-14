@@ -47,3 +47,5 @@ P2 已开始：`TaskRegistry` 已实现 SQLite 初始化、任务父子图、状
 - 先运行定向测试，再运行 `npm run check:architecture`；Rust 环境可用后补 `cargo check` / `cargo test`。
 - 所有任务、事件和 artifact 均可从本地文件或 SQLite 恢复；Concord 只负责 live 通信，不承载编排真相。
 
+
+P8 已开始：BrowserExecutor 已支持 Playwright 风格的 goto/click/fill/press、验证、截图和日志 artifact；真实浏览器通过注入 browserFactory，缺少浏览器依赖时不伪造完成。

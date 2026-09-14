@@ -3419,3 +3419,5 @@ px tauri icon` 生成全尺寸）
 ## TEMP
 - Fix desktop terminal first-frame PTY subscription timing; add Web terminal scroll-to-bottom control and custom device removal confirmation.
 
+
+- 新增 BrowserExecutor 初版，保存浏览器操作日志、截图和验证证据。

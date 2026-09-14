@@ -19,6 +19,7 @@
     "test:authorization": "node --test orchestrator/test/authorization.test.mjs",
     "test:concord-notifier": "node --test orchestrator/test/concord-notifier.test.mjs",
     "test:task-modes": "node --test orchestrator/test/task-modes.test.mjs",
+    "test:browser-executor": "node --test orchestrator/test/browser-executor.test.mjs",
     "report:architecture": "node ./scripts/architecture.mjs --report",
     "dev": "node ./scripts/dev-server.mjs",
     "build": "tsc && vite build",
