@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::{fs, path::PathBuf, sync::Mutex};
 use tauri::State;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -12,8 +12,15 @@ pub struct WorkspanPane {
     pub focused: bool,
 }
 
-#[derive(Default)]
-pub struct WorkbenchState(pub Mutex<Vec<WorkspanPane>>);
+pub struct WorkbenchState(pub Mutex<Vec<WorkspanPane>>, PathBuf);
+
+impl WorkbenchState {
+    pub fn load(path: PathBuf) -> Self {
+        let panes = fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        Self(Mutex::new(panes), path)
+    }
+    fn save(&self, panes: &[WorkspanPane]) { if let Some(parent) = self.1.parent() { let _ = fs::create_dir_all(parent); } if let Ok(text) = serde_json::to_string_pretty(panes) { let _ = fs::write(&self.1, text); } }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +43,7 @@ pub fn workbench_create_pane(state: State<'_, WorkbenchState>, request: CreatePa
     let pane = WorkspanPane { pane_id: request.pane_id, session_id: request.session_id, parent_pane_id: request.parent_pane_id, title: request.title.unwrap_or_else(|| "Agent".into()), focused: true };
     for item in items.iter_mut() { item.focused = false; }
     items.push(pane.clone());
+    state.save(&items);
     Ok(pane)
 }
 
@@ -45,6 +53,7 @@ pub fn workbench_focus_pane(state: State<'_, WorkbenchState>, pane_id: String) -
     let index = items.iter().position(|pane| pane.pane_id == pane_id).ok_or("workbench_pane_not_found")?;
     for item in items.iter_mut() { item.focused = false; }
     items[index].focused = true;
+    state.save(&items);
     Ok(items[index].clone())
 }
 
@@ -52,5 +61,13 @@ pub fn workbench_focus_pane(state: State<'_, WorkbenchState>, pane_id: String) -
 pub fn workbench_remove_pane(state: State<'_, WorkbenchState>, pane_id: String) -> Result<(), String> {
     let mut items = state.0.lock().map_err(|_| "workbench_state_poisoned")?;
     items.retain(|pane| pane.pane_id != pane_id);
+    state.save(&items);
     Ok(())
+}
+
+#[tauri::command]
+pub fn workbench_tasks(state: State<'_, WorkbenchState>) -> Result<serde_json::Value, String> {
+    let path = state.1.parent().unwrap_or_else(|| std::path::Path::new(".")).join("tasks.snapshot.json");
+    let text = fs::read_to_string(path).unwrap_or_else(|_| "[]".into());
+    serde_json::from_str(&text).map_err(|_| "workbench_tasks_snapshot_invalid".into())
 }

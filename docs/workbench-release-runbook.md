@@ -4,6 +4,8 @@
 
 Workbench 使用 `com.cli-manager.workbench`、`%USERPROFILE%\\.cli-manager-workbench` 和 `data-workbench`。发布前运行 `npm run test:workbench-isolation`，确认旧 CLI-Manager 的进程、discovery 和数据目录未被读取。
 
+项目内模型接入使用根目录 `.mcp.json`。启动 Workbench daemon 后，在本项目目录运行 `npm run workbench:mcp` 即可启动常驻 MCP；也可以由 Claude/Codex 按 `.mcp.json` 自动拉起。`npm run workbench:doctor` 会检查 Node、仓库入口、数据目录和 discovery。
+
 ## 验收顺序
 
 1. `npm run test:daemon-adapter`、`npm run test:daemon-fixture` 验证 NDJSON daemon 生命周期。

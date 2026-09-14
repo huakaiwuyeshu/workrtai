@@ -140,6 +140,8 @@ export class TaskRegistry {
     return row ? { ...row, state: parse(row.state_json), resumable: Boolean(row.resumable) } : null;
   }
 
+  snapshot() { return this.listTasks().map((task) => this.getTask(task.task_id)); }
+
   #row(taskId) {
     const row = this.db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
     if (!row) throw new Error(`task_not_found:${taskId}`);

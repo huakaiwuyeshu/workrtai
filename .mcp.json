@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "workrtai-workbench": {
+      "command": "node",
+      "args": ["orchestrator/bin/workbench-mcp.mjs"],
+      "env": {
+        "WORKBENCH_REPO_ROOT": ".",
+        "CLI_MANAGER_WORKBENCH_DATA_DIR": ".workbench"
+      }
+    }
+  }
+}

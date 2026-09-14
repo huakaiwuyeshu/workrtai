@@ -20,6 +20,8 @@
     "test:concord-notifier": "node --test orchestrator/test/concord-notifier.test.mjs",
     "test:task-modes": "node --test orchestrator/test/task-modes.test.mjs",
     "test:browser-executor": "node --test orchestrator/test/browser-executor.test.mjs",
+    "workbench:mcp": "node orchestrator/bin/workbench-mcp.mjs",
+    "workbench:doctor": "node scripts/workbench-doctor.mjs",
     "report:architecture": "node ./scripts/architecture.mjs --report",
     "dev": "node ./scripts/dev-server.mjs",
     "build": "tsc && vite build",

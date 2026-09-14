@@ -1,17 +1,23 @@
 import { TaskRegistry } from "../registry/task-registry.mjs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { assertCanDispatch, validateTaskInput } from "../policies/authorization.mjs";
 
 export class WorkbenchBridge {
-  constructor({ registry = new TaskRegistry(), daemon, notify } = {}) {
+  constructor({ registry = new TaskRegistry(), daemon, notify, snapshotPath = path.resolve(".workbench", "tasks.snapshot.json") } = {}) {
     this.registry = registry;
     this.daemon = daemon;
     this.notify = notify;
+    this.snapshotPath = snapshotPath;
+    this.syncSnapshot();
   }
+
+  syncSnapshot() { try { mkdirSync(path.dirname(this.snapshotPath), { recursive: true }); writeFileSync(this.snapshotPath, JSON.stringify(this.registry.snapshot())); } catch {} }
 
   createTask(input) {
     const parent = input.parent_task_id ? this.registry.getTask(input.parent_task_id).task : null;
     validateTaskInput(input, parent);
-    return this.registry.createTask(input);
+    const task = this.registry.createTask(input); this.syncSnapshot(); return task;
   }
 
   createReviewTask({ title, assigned_cli, assigned_model, callback_agent_id, success_criteria = ["review_report"] }) {
@@ -48,11 +54,11 @@ export class WorkbenchBridge {
   }
 
   postProgress(taskId, input) {
-    return this.registry.postProgress(taskId, input.message, input.percent, input.artifact_ids);
+    const result = this.registry.postProgress(taskId, input.message, input.percent, input.artifact_ids); this.syncSnapshot(); return result;
   }
 
   async postResult(taskId, result) {
-    const outcome = this.registry.postResult(taskId, result);
+    const outcome = this.registry.postResult(taskId, result); this.syncSnapshot();
     const task = this.registry.getTask(taskId).task;
     if (!outcome.duplicate && task.callback_agent_id) await this.notify?.(task.callback_agent_id, { type: `task.${outcome.status}`, task_id: taskId, summary: result.summary, evidence: result.evidence ?? [] });
     return outcome;
