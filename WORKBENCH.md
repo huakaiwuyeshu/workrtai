@@ -18,6 +18,8 @@
 
 项目级工具链目录为 `.tooling`：`rustup`、`cargo`、npm cache、Playwright 浏览器和临时目录均位于 D 盘。若在终端手动执行命令，先运行 `. .\scripts\workbench-env.ps1`。
 
+C 盘清理可先运行 `powershell -File scripts/cleanup-c-drive.ps1` 预览；确认没有相关安装任务后再加 `-Apply`。脚本只处理明确的用户缓存和临时安装包。
+
 ```powershell
 Set-Location $PSScriptRoot
 npm install
