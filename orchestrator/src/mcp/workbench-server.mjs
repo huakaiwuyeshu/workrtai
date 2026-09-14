@@ -5,6 +5,7 @@ const TOOLS = [
   { name: "post_result", description: "Post an idempotent terminal task result", inputSchema: { type: "object", required: ["task_id", "status", "result_version"] } },
   { name: "get_task", description: "Read task, children, events, agents, and artifacts", inputSchema: { type: "object", required: ["task_id"] } },
   { name: "checkpoint", description: "Persist a resumable run checkpoint", inputSchema: { type: "object", required: ["run_id"] } },
+  { name: "evaluate_gate", description: "Evaluate task quality gate evidence", inputSchema: { type: "object", required: ["task_id", "gate_id"] } },
 ];
 
 export class WorkbenchMcpServer {
@@ -23,6 +24,7 @@ export class WorkbenchMcpServer {
     else if (name === "post_result") value = await this.bridge.postResult(args.task_id, args);
     else if (name === "get_task") value = this.bridge.getTask(args.task_id);
     else if (name === "checkpoint") value = this.bridge.checkpoint(args.run_id, args.state ?? {});
+    else if (name === "evaluate_gate") value = this.bridge.evaluateGate(args.task_id, args.gate_id);
     else throw new Error(`unknown_workbench_tool:${name}`);
     return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
   }
@@ -43,4 +45,3 @@ export class WorkbenchMcpServer {
     }
   }
 }
-

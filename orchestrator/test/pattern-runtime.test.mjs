@@ -16,7 +16,7 @@ test("runs child-task pattern with approval, dispatch, wait and synthesize", asy
   const result = await runtime.run({
     pattern: { id: "child_task", max_agents: 1, max_rounds: 1, requires_human_approval: true, steps: [{ create: "child" }, { dispatch: "child" }, { wait: "child" }] },
     rootTaskId: "root",
-    context: { child: { type: "child_task", title: "verify", assigned_cli: "claude", allowed_paths: [], allowed_tools: [], success_criteria: [] } },
+    context: { child: { type: "child_task", title: "verify", assigned_cli: "claude", allowed_paths: ["src"], allowed_tools: ["test"], success_criteria: ["green"] } },
   });
   assert.equal(result.status, "waiting");
   registry.close();
