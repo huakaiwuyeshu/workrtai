@@ -17,6 +17,7 @@
     "test:pattern-runtime": "node --test orchestrator/test/pattern-runtime.test.mjs",
     "test:workbench-mcp": "node --test orchestrator/test/workbench-server.test.mjs",
     "test:authorization": "node --test orchestrator/test/authorization.test.mjs",
+    "test:concord-notifier": "node --test orchestrator/test/concord-notifier.test.mjs",
     "report:architecture": "node ./scripts/architecture.mjs --report",
     "dev": "node ./scripts/dev-server.mjs",
     "build": "tsc && vite build",

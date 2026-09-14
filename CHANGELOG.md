@@ -13,6 +13,7 @@
 - 新增本地 stdio Workbench MCP，向模型暴露任务创建、派发、进度、结果、查询和 checkpoint 工具。
 - 增加 child_task scope/criteria 校验与 evaluate_gate 工具，阻止越权或缺少验收标准的子任务。
 - 增加独立 daemon fixture 集成测试，验证真实 TCP/NDJSON 生命周期和隔离 discovery。
+- 增加 Concord notifier，检查 promptable presence，使用稳定幂等键并禁止对不可达 Agent 自动改派。
 
 ### 文件浏览器系统剪贴板粘贴
 
