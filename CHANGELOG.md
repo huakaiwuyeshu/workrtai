@@ -9,6 +9,7 @@
 - 补齐 status/write/close、exit/hook_report 事件、重连和非法参数测试。
 - 新增 Workbench SQLite Task Registry 初版，支持父子任务、状态机、幂等结果、artifact 和 checkpoint。
 - 新增 WorkbenchBridge 初版，连接 daemon 派发、Agent 绑定和父任务回调通知。
+- 新增声明式 Pattern Runtime 初版，支持人工审批、任务步骤、轮次和 Agent 数量上限。
 
 ### 文件浏览器系统剪贴板粘贴
 

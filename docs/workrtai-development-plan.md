@@ -36,7 +36,7 @@
 
 第一批已完成：adapter 已覆盖完整白名单生命周期、主动 `output/exit/hook_report` 事件、协议版本阻断、Session ID/写入参数校验和显式 reconnect；fake-daemon 测试共 3 项通过。下一批是接入本机 Workbench daemon 的真实 fixture，仍不连接现有 CLI-Manager daemon。
 
-P2 已开始：`TaskRegistry` 已实现 SQLite 初始化、任务父子图、状态转移、幂等 `postResult`、artifact、task_agents 和 checkpoint；`WorkbenchBridge` 已实现任务创建、daemon 派发、Agent 绑定和一次性回调通知。下一步补本地 MCP 接口与 Pattern Runtime。
+P2 已开始：`TaskRegistry` 已实现 SQLite 初始化、任务父子图、状态转移、幂等 `postResult`、artifact、task_agents 和 checkpoint；`WorkbenchBridge` 已实现任务创建、daemon 派发、Agent 绑定和一次性回调通知。P5 的 Pattern Runtime 基础已开始，支持 approval、create、dispatch、wait、evaluate、synthesize 步骤及 Agent/轮次上限。下一步补本地 MCP 接口与真实 Concord 通知适配。
 
 完成 P1 后再进入 P2；在 P1 验收前，Bridge 不得创建真实 child Session。
 
