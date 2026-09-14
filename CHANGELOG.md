@@ -3421,3 +3421,7 @@ px tauri icon` 生成全尺寸）
 
 
 - 新增 BrowserExecutor 初版，保存浏览器操作日志、截图和验证证据。
+## Unreleased
+
+- 完成 Agent Workbench P3-P9 核心闭环：人工 handoff/追问、子 Agent 通知、Pattern DAG/checkpoint、Workspan pane registry、WorkbenchPanel，以及浏览器 artifact 回写。
+- 新增 Workbench MCP 工具 `handoff_task`、`ask_agent`、`list_tasks`。

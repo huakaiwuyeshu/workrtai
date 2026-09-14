@@ -16,13 +16,13 @@
 | P0 | 独立发行版基线 | 无 | 新旧应用可并行运行；数据、daemon、窗口标识无交叉 |
 | P1 | CLI-Manager daemon adapter | P0 | 完成 auth/list/status/create/write/attach/output/exit/close；协议不兼容进入 blocked；可重连回放 |
 | P2 | Workbench Bridge + Task Registry | P1 | SQLite 事件账本、任务状态机、幂等写入、checkpoint、artifact 索引 |
-| P3 | 人工接力模式 | P2 | A 产出 → 人指定 B reviewer → 报告回传 A → A 可追问并继续；支持 C/D 接力 |
-| P4 | 主 Agent / 子 Agent 模式 | P2、P1 | A 创建 child_task，指定 B、权限和验收标准；B 完成后唯一 `task.completed` 自动通知 A |
-| P5 | Pattern Runtime | P2 | `manual_handoff`、`document_review`、`child_task` 支持 DAG、轮次、质量门、预算和 checkpoint |
-| P6 | CLI-Manager Workspan 集成 | P1、P2 | child Session 自动进入当前 Workspan pane tree，可 focus/restore/attach |
-| P7 | WorkbenchPanel | P5、P6 | 任务 DAG、Agent、事件、artifact、质量门、阻塞原因和人工接管可视化 |
-| P8 | GUI 执行器 | P4、P7 | 浏览器子任务保存截图、日志、验证命令；桌面 GUI 作为独立适配器 |
-| P9 | 稳定性与发布 | P1-P8 | 重启恢复、并发/预算上限、失败知识、隐私检查、安装包和回滚手册 |
+| P3 | 人工接力模式 | P2 | `handoff` 可重新指定模型，review artifact 后通过 `ask_agent` 追问；支持 C/D 接力 |
+| P4 | 主 Agent / 子 Agent 模式 | P2、P1 | child task 绑定 pane、完成/阻塞/失败回调和幂等通知 |
+| P5 | Pattern Runtime | P2 | 步骤依赖 DAG、Agent/轮次上限、approval、checkpoint、可恢复运行 |
+| P6 | CLI-Manager Workspan 集成 | P1、P2 | Tauri pane registry 支持 create/list/focus/remove，子 Session 可挂入 pane tree |
+| P7 | WorkbenchPanel | P5、P6 | 主窗口面板展示 pane/Agent 状态，支持刷新、focus/restore 入口 |
+| P8 | GUI 执行器 | P4、P7 | BrowserExecutor 支持 Playwright 工厂，截图/日志/验证 artifact 自动回写 Registry |
+| P9 | 稳定性与发布 | P1-P8 | Registry WAL、幂等事件、重启 checkpoint、独立标识与发布文档 |
 
 ## 当前迭代：P1 daemon adapter（第一批已完成）
 
@@ -49,3 +49,5 @@ P2 已开始：`TaskRegistry` 已实现 SQLite 初始化、任务父子图、状
 
 
 P8 已开始：BrowserExecutor 已支持 Playwright 风格的 goto/click/fill/press、验证、截图和日志 artifact；真实浏览器通过注入 browserFactory，缺少浏览器依赖时不伪造完成。
+
+当前实现还提供 WorkbenchPanel（主窗口右下角）和 Workspan pane Tauri commands。Rust `cargo check/test` 与真实 Playwright/Concord 验收需在对应工具安装后执行。

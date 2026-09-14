@@ -22,3 +22,13 @@ test("persists task graph, artifacts, checkpoints, and idempotent results", asyn
   assert.throws(() => registry.transition("task-child", "running"), /invalid_task_transition/);
   registry.close();
 });
+
+test("lists tasks and reads latest checkpoint", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "workrtai-registry-list-"));
+  const registry = new TaskRegistry(path.join(root, "workbench.sqlite"));
+  registry.createTask({ task_id: "root", run_id: "run-list", type: "integration_task", title: "Root", allowed_paths: [], allowed_tools: [], success_criteria: [] });
+  registry.checkpoint("run-list", { cursor: 2 });
+  assert.equal(registry.listTasks({ runId: "run-list" }).length, 1);
+  assert.equal(registry.latestCheckpoint("run-list").state.cursor, 2);
+  registry.close();
+});

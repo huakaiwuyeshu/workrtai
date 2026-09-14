@@ -8,6 +8,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Sidebar } from "../features/projects/index";
 import { TerminalTabs } from "../features/terminal/index";
 import { WorkspaceLayoutShell } from "../features/workspace/api/WorkspaceLayoutShell";
+import { WorkbenchPanel } from "../features/workbench/WorkbenchPanel";
 import { ProjectFileRefreshController } from "../features/files/api/ProjectFileRefreshController";
 import { CommandPalette } from "../features/workspace/api/CommandPalette";
 import type { LucideIcon } from "lucide-react";
@@ -1909,6 +1910,7 @@ function App() {
       </Suspense>
       </WorkspaceLayoutShell>
       <CommandPalette />
+      <WorkbenchPanel />
       <ExternalSessionSyncDialog />
       <CloseConfirmDialog
         open={closeDialogOpen}

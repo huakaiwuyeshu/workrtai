@@ -1,0 +1,13 @@
+.workbench-panel { position: fixed; right: 16px; bottom: 16px; z-index: 40; font-size: 12px; color: var(--text-primary, #e9eef2); }
+.workbench-toggle { border: 1px solid color-mix(in srgb, var(--border, #60727d) 70%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--surface, #18242a) 92%, transparent); padding: 8px 12px; box-shadow: 0 8px 28px #0005; }
+.workbench-panel__body { width: 320px; margin-top: 8px; border: 1px solid var(--border, #60727d); border-radius: 12px; background: var(--surface, #18242a); box-shadow: 0 16px 42px #0008; padding: 12px; }
+.workbench-panel header, .workbench-panel li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.workbench-panel header { margin-bottom: 8px; }
+.workbench-panel header button { font-size: 11px; opacity: .75; }
+.workbench-panel ul { list-style: none; padding: 0; margin: 0; }
+.workbench-panel li { padding: 7px 4px; border-top: 1px solid #ffffff12; }
+.workbench-panel li button { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
+.workbench-panel li small { opacity: .55; max-width: 210px; overflow: hidden; text-overflow: ellipsis; }
+.workbench-panel li i { font-style: normal; font-size: 10px; color: #76d6a5; }
+.workbench-panel .workbench-empty { opacity: .6; padding: 12px 0; }
+.workbench-panel footer { margin-top: 10px; opacity: .55; line-height: 1.5; }

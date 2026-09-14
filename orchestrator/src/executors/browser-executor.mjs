@@ -23,5 +23,13 @@ export class BrowserExecutor {
     } catch (error) { log.push({ error: String(error) }); return { status: "failed", log, blockers: [String(error)], evidence: [{ kind: "browser_log", content: log }] }; }
     finally { await browser.close(); }
   }
-}
 
+  async runTask({ bridge, taskId, url, actions = [], verify }) {
+    if (!bridge) throw new Error("workbench_bridge_required");
+    bridge.postProgress(taskId, { message: "browser task started", percent: 5 });
+    const result = await this.run({ taskId, url, actions, verify });
+    const artifacts = (result.evidence ?? []).map((item) => ({ kind: item.kind, path: item.path, content: item.content }));
+    await bridge.postResult(taskId, { status: result.status, summary: result.status === "completed" ? "browser task completed" : "browser task failed", evidence: result.evidence ?? [], artifacts, result_version: 1 });
+    return result;
+  }
+}

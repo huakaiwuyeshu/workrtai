@@ -86,6 +86,8 @@ pub mod terminal_shell;
 pub mod third_party_notification;
 #[path = "../features/system/version.rs"]
 pub mod version;
+#[path = "../features/workbench/mod.rs"]
+pub mod workbench;
 pub mod web_conversation;
 pub mod web_device;
 pub mod web_server;

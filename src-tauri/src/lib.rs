@@ -553,6 +553,7 @@ pub fn run() {
         .manage(commands::cc_connect::CcConnectManager::new())
         .manage(commands::web_device::WebDeviceManager::new())
         .manage(commands::web_server::WebServerManager::default())
+        .manage(commands::workbench::WorkbenchState::default())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(
             SqlBuilder::default()
@@ -563,6 +564,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::agent_capabilities::agent_capabilities_inspect,
             commands::agent_capabilities::agent_capabilities_probe,
+            commands::workbench::workbench_list_panes,
+            commands::workbench::workbench_create_pane,
+            commands::workbench::workbench_focus_pane,
+            commands::workbench::workbench_remove_pane,
             commands::opencode_hook::opencode_hook_status,
             commands::opencode_hook::opencode_hook_install,
             commands::opencode_hook::opencode_hook_uninstall,

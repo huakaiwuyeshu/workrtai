@@ -22,6 +22,20 @@ export class WorkbenchBridge {
     return this.createTask({ ...input, type: "child_task", parent_task_id: parentTaskId });
   }
 
+  async handoff(taskId, { assigned_cli, assigned_model, callback_agent_id } = {}) {
+    const current = this.registry.getTask(taskId).task;
+    if (!["review_task", "child_task"].includes(current.type)) throw new Error("handoff_task_type_required");
+    this.registry.updateAssignment(taskId, { assigned_cli, assigned_model, callback_agent_id });
+    return this.dispatchTask(taskId);
+  }
+
+  async ask(taskId, message) {
+    const agent = this.registry.getTask(taskId).agents[0];
+    if (!agent || !this.daemon) throw new Error("task_agent_unavailable");
+    await this.daemon.write(agent.session_ref, `${message}\n`);
+    return { task_id: taskId, session_ref: agent.session_ref, delivered: true };
+  }
+
   async dispatchTask(taskId) {
     const task = this.registry.getTask(taskId).task;
     if (!this.daemon) throw new Error("daemon_adapter_required");
@@ -52,6 +66,19 @@ export class WorkbenchBridge {
   }
 
   getTask(taskId) { return this.registry.getTask(taskId); }
+  listTasks(filter) { return this.registry.listTasks(filter); }
+  async recoverRunningTasks() {
+    const tasks = this.registry.listTasks({ status: "running" });
+    if (!this.daemon?.list) return { recovered: [], unavailable: tasks.map((task) => task.task_id) };
+    const sessions = await this.daemon.list();
+    const active = new Set(sessions.map((session) => session.session_id ?? session.sessionId));
+    const recovered = [], unavailable = [];
+    for (const task of tasks) {
+      const ref = this.registry.getTask(task.task_id).agents[0]?.session_ref;
+      if (ref && active.has(ref)) recovered.push(task.task_id); else unavailable.push(task.task_id);
+    }
+    return { recovered, unavailable };
+  }
   checkpoint(runId, state) { return this.registry.checkpoint(runId, state); }
   evaluateGate(taskId, gateId) {
     const record = this.registry.getTask(taskId);

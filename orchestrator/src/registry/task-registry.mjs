@@ -102,6 +102,13 @@ export class TaskRegistry {
     return agent;
   }
 
+  updateAssignment(taskId, { assigned_cli, assigned_model, callback_agent_id } = {}) {
+    this.#row(taskId);
+    this.db.prepare("UPDATE tasks SET assigned_cli = COALESCE(?, assigned_cli), assigned_model = COALESCE(?, assigned_model), callback_agent_id = COALESCE(?, callback_agent_id), updated_at = ? WHERE task_id = ?")
+      .run(assigned_cli ?? null, assigned_model ?? null, callback_agent_id ?? null, now(), taskId);
+    return this.getTask(taskId).task;
+  }
+
   checkpoint(runId, state, lastEventId = this.#lastEvent(runId)) {
     const checkpointId = id("checkpoint");
     this.db.prepare("INSERT INTO checkpoints (checkpoint_id,run_id,last_event_id,state_json,created_at) VALUES (?,?,?,?,?)").run(checkpointId, runId, lastEventId ?? "", json(state), now());
@@ -117,6 +124,20 @@ export class TaskRegistry {
     const artifacts = this.db.prepare("SELECT * FROM task_artifacts WHERE task_id = ? ORDER BY created_at").all(taskId).map((artifact) => ({ ...artifact, content: parse(artifact.content_json) }));
     const agents = this.db.prepare("SELECT * FROM task_agents WHERE task_id = ? AND unbound_at IS NULL ORDER BY bound_at").all(taskId);
     return { task, children, events, artifacts, agents };
+  }
+
+  listTasks({ runId, parentTaskId, status } = {}) {
+    const clauses = [], args = [];
+    if (runId) { clauses.push("run_id = ?"); args.push(runId); }
+    if (parentTaskId !== undefined) { clauses.push("parent_task_id IS ?"); args.push(parentTaskId); }
+    if (status) { clauses.push("status = ?"); args.push(status); }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.db.prepare(`SELECT task_id FROM tasks${where} ORDER BY created_at`).all(...args).map(({ task_id }) => this.getTask(task_id).task);
+  }
+
+  latestCheckpoint(runId) {
+    const row = this.db.prepare("SELECT * FROM checkpoints WHERE run_id = ? ORDER BY created_at DESC LIMIT 1").get(runId);
+    return row ? { ...row, state: parse(row.state_json), resumable: Boolean(row.resumable) } : null;
   }
 
   #row(taskId) {

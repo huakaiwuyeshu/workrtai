@@ -12,7 +12,8 @@ export class PatternRuntime {
     if (!pattern?.id || !Array.isArray(pattern.steps)) throw new Error("invalid_pattern");
     if (pattern.requires_human_approval && !(await this.approve({ patternId: pattern.id, rootTaskId }))) return { status: "blocked", reason: "human_approval_required" };
     const run = { pattern_id: pattern.id, root_task_id: rootTaskId, rounds: 0, agents: 0, outputs: [] };
-    for (const step of pattern.steps) {
+    const steps = topologicalSteps(pattern.steps);
+    for (const step of steps) {
       if (step.create) {
         if (++run.agents > (pattern.max_agents ?? Infinity)) throw new PatternLimitError("max_agents_exceeded");
         const task = this.bridge.createTask({ ...context[step.create], parent_task_id: step.create === "child" ? rootTaskId : undefined });
@@ -32,9 +33,30 @@ export class PatternRuntime {
         if (task.status !== "completed") return { status: task.status, run, task_id: taskId };
       } else if (step.synthesize) {
         run.outputs.push({ step: "synthesize", task_id: rootTaskId });
+      } else if (step.checkpoint) {
+        run.outputs.push({ step: "checkpoint", checkpoint: this.bridge.checkpoint(run.root_task_id ?? rootTaskId, run) });
       } else throw new Error("unknown_pattern_step");
     }
     return { status: "completed", run };
   }
 }
 
+function topologicalSteps(steps) {
+  const byId = new Map(steps.map((step, i) => [step.id ?? `step-${i}`, step]));
+  const done = new Set(), ordered = [];
+  while (ordered.length < steps.length) {
+    const next = [...byId.entries()].find(([id, step]) => !done.has(id) && (step.after ?? []).every((dep) => done.has(dep)));
+    if (!next) throw new Error("pattern_dependency_cycle");
+    done.add(next[0]); ordered.push(next[1]);
+  }
+  return ordered;
+}
+
+export async function loadPattern(filePath) {
+  const { readFile } = await import("node:fs/promises");
+  const text = await readFile(filePath, "utf8");
+  if (filePath.endsWith(".json")) return JSON.parse(text);
+  const yaml = await import("yaml").catch(() => null);
+  if (!yaml) throw new Error("yaml_dependency_required");
+  return yaml.parse(text);
+}

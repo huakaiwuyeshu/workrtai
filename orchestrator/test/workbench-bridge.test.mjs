@@ -23,3 +23,16 @@ test("bridge dispatches child task and notifies callback exactly once", async ()
   registry.close();
 });
 
+test("supports reviewer handoff and follow-up question", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "workrtai-handoff-"));
+  const registry = new TaskRegistry(path.join(root, "workbench.sqlite"));
+  const writes = [];
+  const daemon = { create: async ({ sessionId }) => ({ session_id: sessionId }), write: async (id, data) => writes.push([id, data]) };
+  const bridge = new WorkbenchBridge({ registry, daemon });
+  const task = bridge.createReviewTask({ title: "review", assigned_cli: "claude", assigned_model: "A", callback_agent_id: "main" });
+  await bridge.handoff(task.task_id, { assigned_cli: "codex", assigned_model: "B" });
+  await bridge.ask(task.task_id, "请检查 artifact");
+  assert.equal(bridge.getTask(task.task_id).task.assigned_model, "B");
+  assert.equal(writes.length, 1);
+  registry.close();
+});
