@@ -2,6 +2,11 @@
 
 ## [TEMP] - 2026-09-14
 
+### Agent Workbench daemon adapter
+
+- 新增独立 Workbench daemon adapter，读取 Workbench 专属 discovery，支持 auth、list、status、create、write、attach、close 和 output/exit/hook_report 事件转发。
+- 增加协议版本校验、Session ID 校验、请求超时、断线清理和 fake-daemon 定向测试；不连接或修改现有 CLI-Manager 数据根。
+
 ### 文件浏览器系统剪贴板粘贴
 
 - 文件树、两种搜索和目录空白区域支持 Ctrl/Command+V 与右键粘贴：Windows 资源管理器复制的文件/文件夹导入目标目录，截图保存为带时间与唯一后缀的 PNG；选中文件时粘贴到其父目录。
