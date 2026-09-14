@@ -6,7 +6,7 @@
 | 作者 | 待用户署名 |
 | 日期 | 2026-09-14 |
 | 状态 | Final design baseline（待实现） |
-| 首个落地目录 | `C:\Users\Administrator\Nutstore\1\me\多session` |
+| 首个落地目录 | `C:\Users\Administrator\Nutstore\1\me\workrtai` |
 | 读者 | 负责实现和验收 CLI-Manager + Workbench 的本人 |
 
 本文是**可执行规格**，不是幻灯片。Day-1 先不改 CLI-Manager，用 sidecar 验证通信；最终集成阶段以 CLI-Manager 的 daemon / Workspan 能力为适配面，在 fork 中加入最小 Workbench command 和任务面板。
@@ -85,11 +85,11 @@ Handoff 文件是有损的：发送方一旦总结，细节、否决过的方案
 | 数据目录 | `C:\Users\22908\.cli-manager` |
 | 分组 | `自用`（id `8bd3400b-fafe-4cf5-af7b-0d3e73595037`） |
 | Project `分析招聘` | path `C:\Users\Administrator\Nutstore\1\me`, `cli_tool=codex`, `worktree_strategy=disabled` |
-| Project `多session` | path `C:\Users\Administrator\Nutstore\1\me\多session`, `cli_tool=grok`, `worktree_strategy=disabled` |
+| Project `多session` | path `C:\Users\Administrator\Nutstore\1\me\workrtai`, `cli_tool=grok`, `worktree_strategy=disabled` |
 | 当前 Workspan | `workspan-mtzv1em9-1`，仅 1 个 Grok pane |
 | 工作区内容 | **空**（无现成代码可引用）；今天还不是 git repo。**决议（Q3=A）：本目录将 `git init`**。`.concord/` ignore；`docs/stages/`、`docs/HANDOFF.md`、`docs/kit/` 入库。仍建议显式 `CONCORD_REPO_ROOT`，不要只靠探测 |
 | Grok Build | `C:\Users\22908\.grok\bin\grok.exe`，`grok 1.0.30`，model `grok-4.6`，`permission_mode=always-approve` |
-| Grok folder trust | `C:\Users\22908\.grok\trusted_folders.toml` **没有** `C:\Users\Administrator\Nutstore\1\me\多session`，也没有 `C:\Users\Administrator\Nutstore\1\me`（只有 Desktop 与 `E:\zuhaowan\aihub\aihub`）。项目 `AGENTS.md` / `.grok/config.toml` MCP **未信任则不加载** |
+| Grok folder trust | `C:\Users\22908\.grok\trusted_folders.toml` **没有** `C:\Users\Administrator\Nutstore\1\me\workrtai`，也没有 `C:\Users\Administrator\Nutstore\1\me`（只有 Desktop 与 `E:\zuhaowan\aihub\aihub`）。项目 `AGENTS.md` / `.grok/config.toml` MCP **未信任则不加载** |
 | Codex | `codex-cli 0.153.4`，`model=gpt-6-astra`，`approval_policy=never`，`sandbox_mode=danger-full-access`；`[projects.'e:\zuhaowan\me'] trust_level="trusted"`（另有 `e:\zuhaowan`）。**子目录 `多session` 无单独条目**，第一次在该 cwd 启动仍可能弹出信任提示 |
 | Claude Code | `C:\Users\22908\.local\bin\claude.exe`，`2.1.263` |
 | Gemini | **PATH 上没有 `gemini`**。存在 Antigravity CLI：`agy.exe` `1.1.27`（`C:\Users\22908\AppData\Local\agy\bin\agy.exe`） |
@@ -158,7 +158,7 @@ CLI-Manager 不是总线。它只负责把四个 CLI 拉起来、cwd 指到同�
 
 ### Goals（Day-1）
 
-- 在 `C:\Users\Administrator\Nutstore\1\me\多session` 放下可复制的文件套件（规则、任务板、HANDOFF、阶段笔记）。
+- 在 `C:\Users\Administrator\Nutstore\1\me\workrtai` 放下可复制的文件套件（规则、任务板、HANDOFF、阶段笔记）。
 - 同一 Workspan 内至少 **Codex + Claude** 连上**同一个** Concord workspace（agy / Grok director 可选，且 Grok director 仅 ≥3 活 session）。
 - Codex（GPT-6）能向仍活着的 Claude session **提问**；Claude 能 **回复**；你不用复制粘贴。**两边都要 `start_work`，即使 `TASK.md` owner 只是其中一个。**
 - Claude 空闲时的唤醒路径是 `concord-relay`（或人在 pane 里 nudge）。Grok monitor **不是**这条验收的前置。
@@ -336,7 +336,7 @@ human_approval: [final_acceptance]
 ### 目标目录布局（本仓库 = 第一份实例）
 
 ```
-C:\Users\Administrator\Nutstore\1\me\多session\
+C:\Users\Administrator\Nutstore\1\me\workrtai\
 ├── AGENTS.md                 # 所有 CLI 都读的规则（canonical）
 ├── CLAUDE.md                 # 5 行指针，避免和 AGENTS.md 重复两套规则
 ├── GEMINI.md                 # agy 指针（agy 会读；不是官方 Gemini CLI 配置）
@@ -394,7 +394,7 @@ C:\Users\Administrator\Nutstore\1\me\多session\
 
 ### 文件套件：完整模板（可复制）
 
-以下模板是 Day-1 要落到 `C:\Users\Administrator\Nutstore\1\me\多session` 的正文。根目录配置写死本机路径；`docs/kit/` 里全部改成占位符 `__CONCORD_REPO_ROOT__`（正斜杠，无尾斜杠），复制脚本做 `-replace`，禁止手改三份漏一份。
+以下模板是 Day-1 要落到 `C:\Users\Administrator\Nutstore\1\me\workrtai` 的正文。根目录配置写死本机路径；`docs/kit/` 里全部改成占位符 `__CONCORD_REPO_ROOT__`（正斜杠，无尾斜杠），复制脚本做 `-replace`，禁止手改三份漏一份。
 
 #### `AGENTS.md`
 
@@ -687,7 +687,7 @@ Thumbs.db
     "concord": {
       "command": "concord-mcp",
       "env": {
-        "CONCORD_REPO_ROOT": "E:/zuhaowan/me/多session",
+        "CONCORD_REPO_ROOT": "C:/Users/Administrator/Nutstore/1/me/workrtai",
         "CONCORD_TELEMETRY_DISABLED": "1"
       }
     }
@@ -709,7 +709,7 @@ enabled = true
 startup_timeout_sec = 30
 
 [mcp_servers.concord.env]
-CONCORD_REPO_ROOT = "E:/zuhaowan/me/多session"
+CONCORD_REPO_ROOT = "C:/Users/Administrator/Nutstore/1/me/workrtai"
 CONCORD_TELEMETRY_DISABLED = "1"
 ```
 
@@ -717,7 +717,7 @@ CONCORD_TELEMETRY_DISABLED = "1"
 
 ```powershell
 grok mcp add --scope project concord `
-  -e "CONCORD_REPO_ROOT=E:/zuhaowan/me/多session" `
+  -e "CONCORD_REPO_ROOT=C:/Users/Administrator/Nutstore/1/me/workrtai" `
   -e "CONCORD_TELEMETRY_DISABLED=1" `
   -- concord-mcp
 ```
@@ -738,13 +738,13 @@ startup_timeout_sec = 30
 tool_timeout_sec = 120
 
 [mcp_servers.concord.env]
-CONCORD_REPO_ROOT = "E:/zuhaowan/me/多session"
+CONCORD_REPO_ROOT = "C:/Users/Administrator/Nutstore/1/me/workrtai"
 CONCORD_TELEMETRY_DISABLED = "1"
 ```
 
 说明：
 
-- 官方 Codex 文档允许 trusted project 使用 `.codex/config.toml`。父目录 trusted **通常**覆盖子目录，但不是操作上的充分条件：在 `C:\Users\Administrator\Nutstore\1\me\多session` 启动后必须确认 trust，且 `/mcp` 能看到 concord。若点成 untrusted，项目 MCP 整层跳过，看起来像「TOML 被忽略」（Q5）。
+- 官方 Codex 文档允许 trusted project 使用 `.codex/config.toml`。父目录 trusted **通常**覆盖子目录，但不是操作上的充分条件：在 `C:\Users\Administrator\Nutstore\1\me\workrtai` 启动后必须确认 trust，且 `/mcp` 能看到 concord。若点成 untrusted，项目 MCP 整层跳过，看起来像「TOML 被忽略」（Q5）。
 - `codex mcp add` **没有** `--scope`，会写到 `~/.codex/config.toml`。Day-1 **不要**用它，除非项目级配置被当前 0.153.4 忽略。
 - `tool_timeout_sec = 120`：为 prompt/reply 预留；Concord 是否 long-poll 以安装后 schema 为准。
 
@@ -767,7 +767,7 @@ agy 1.1.27 文档只承认：
     "concord": {
       "command": "concord-mcp",
       "env": {
-        "CONCORD_REPO_ROOT": "E:/zuhaowan/me/多session",
+        "CONCORD_REPO_ROOT": "C:/Users/Administrator/Nutstore/1/me/workrtai",
         "CONCORD_TELEMETRY_DISABLED": "1"
       }
     }
@@ -857,7 +857,7 @@ $env:Path = "$npmBin;" + $env:Path
 
 ```powershell
 # A) 进入任务夹并 git init（Q3=A；.concord/ 已被 .gitignore 排除）
-Set-Location -LiteralPath 'C:\Users\Administrator\Nutstore\1\me\多session'
+Set-Location -LiteralPath 'C:\Users\Administrator\Nutstore\1\me\workrtai'
 if (-not (Test-Path .git)) { git init }
 
 # B) 若 PR-1 套件已在，先快照人写的规则（setup 会改 AGENTS.md / CLAUDE.md / .codex/）
@@ -873,7 +873,7 @@ Get-Command concord, concord-mcp | Format-Table Name, Source
 concord --version
 
 # D) 只初始化 workspace，不写 MCP、不装 adapters、随后恢复规则
-$env:CONCORD_REPO_ROOT = 'E:/zuhaowan/me/多session'
+$env:CONCORD_REPO_ROOT = 'C:/Users/Administrator/Nutstore/1/me/workrtai'
 $env:CONCORD_TELEMETRY_DISABLED = '1'
 concord setup --no-mcp --no-adapters
 Copy-Item -Force AGENTS.md.kitbak AGENTS.md
@@ -903,7 +903,7 @@ concord doctor
 concord adapters status
 
 # H) Claude 项目 MCP：已有 .mcp.json 则在 Claude UI 批准 concord
-#    或：claude mcp add --scope project concord -e "CONCORD_REPO_ROOT=E:/zuhaowan/me/多session" -e "CONCORD_TELEMETRY_DISABLED=1" -- concord-mcp
+#    或：claude mcp add --scope project concord -e "CONCORD_REPO_ROOT=C:/Users/Administrator/Nutstore/1/me/workrtai" -e "CONCORD_TELEMETRY_DISABLED=1" -- concord-mcp
 claude mcp list
 
 # I) Codex：不要 codex mcp add。在本目录启动后确认 trust 提示选信任，然后 /mcp 看到 concord
@@ -912,7 +912,7 @@ Get-Content -LiteralPath '.\.codex\config.toml'
 # J) 可选（PR-4）：仅当已经有 ≥3 个模型 session 同时活着，才开专职 Grok director
 #    两个 pane（Codex+Claude）时跳过。本机 trusted_folders.toml 尚无本目录。
 #    批准 trust 或 grok --trust / /hooks-trust，然后 grok inspect
-#    grok mcp add --scope project concord -e "CONCORD_REPO_ROOT=E:/zuhaowan/me/多session" -e "CONCORD_TELEMETRY_DISABLED=1" -- concord-mcp
+#    grok mcp add --scope project concord -e "CONCORD_REPO_ROOT=C:/Users/Administrator/Nutstore/1/me/workrtai" -e "CONCORD_TELEMETRY_DISABLED=1" -- concord-mcp
 #    该 Grok session 内一个 persistent monitor: concord inbox watch --provider grok
 
 # K) 可选（PR-5）：agy 用户级 MCP。不要写项目 .gemini/settings.json
@@ -947,7 +947,7 @@ Codex/Claude 不要跑这条命令。
 
 1. 只打开分组 `自用` 里的 Project **`多session`**，不要新建第二个 Project，不要从 `分析招聘` 开。
 2. 在**现有** Workspan `workspan-mtzv1em9-1` 里分屏加 pane（Split Right / Split Down），不要另开 Workspan 当「新任务」。
-3. 每个 pane 的 cwd 必须是 `C:\Users\Administrator\Nutstore\1\me\多session`（Tab 悬浮信息或 `pwd` 核对）。
+3. 每个 pane 的 cwd 必须是 `C:\Users\Administrator\Nutstore\1\me\workrtai`（Tab 悬浮信息或 `pwd` 核对）。
 4. 保持 `worktree_strategy=disabled`。不要对该项目点 Worktree。
 5. Day-1 最少两个 pane：`codex` 和 `claude`。第三窗若要拆任务用 `agy`（不是 `gemini`）。专职 Grok director **仅当已有 ≥3 个模型 session 同时活着**才开；两个 pane 时不开第四窗。已有的默认 Grok pane 可关掉或留着，但**不是** prompt/reply 验收的前置。
 
@@ -957,7 +957,7 @@ Codex/Claude 不要跑这条命令。
 
 #### 身份与在场
 
-1. 人在 **Project `多session` 的现有 Workspan** 打开至少 Codex + Claude 两个 pane，cwd 均为 `C:\Users\Administrator\Nutstore\1\me\多session`。
+1. 人在 **Project `多session` 的现有 Workspan** 打开至少 Codex + Claude 两个 pane，cwd 均为 `C:\Users\Administrator\Nutstore\1\me\workrtai`。
 2. **每个要提问或要被提问的 CLI** 读 `AGENTS.md` → **`start_work` 注册 presence**（reviewer / observer 不 claim；child Agent 仅 claim 任务包内 scope）。第一次不要传入自造的 `agent_id`。Day-1：Codex **和** Claude 都要做，即使 Current owner 是 `human` 或只有 Codex。
 3. 再 `inspect_work`。用 `start_work` / `inspect_work` **返回值**里的 `workspace_id`、`agent_id` 回填 `TASK.md` roster。禁止使用上一 session 的 id，禁止第一次调用前编 id。
 4. `inspect_work` 显示：谁在、是否 promptable、inbox、stale claim。`to_agent_id` 只从这里抄。
@@ -1143,7 +1143,7 @@ idempotency_key = "codex-" + SHA256(content) 的前 8 位 hex，不要加时间�
 
 工程实现以 [docs/implementation-plan.md](./implementation-plan.md) 为准：该文件定义 Bridge 模块、Workbench MCP、SQLite v1、状态转移、两种场景的确定性流程、daemon 适配器和 PR-6/PR-7 验收。本文保留架构决策与运行规则，实施契约不再散落在各章节。
 
-本次独立 fork 工作目录为 `C:\Users\Administrator\Nutstore\1\me\cli-manager-workbench`，分支为 `workbench-integration`。它作为全新软件单独构建和运行，不替换本机已有 CLI-Manager。
+本次独立 fork 工作目录为 `C:\Users\Administrator\Nutstore\1\me\workrtai`，分支为 `workbench-integration`。它作为全新软件单独构建和运行，不替换本机已有 CLI-Manager。
 
 ## API / Interface Changes
 
@@ -1321,7 +1321,7 @@ Task Registry 是项目级任务状态的唯一编排来源，最终实现使用
 | F6 | 两模型同时改同一文件 | P1 | diff 互相覆盖 | 仅 Current owner 或已授权 child 在各自 scope 内 claim；overlap 则停。reviewer / observer 即使已 `start_work` 也只读。 |
 | F7 | agy 未合并用户级 MCP，或误写项目 `.gemini/settings.json` | P2 | 右窗没有 Concord 工具 | 只改 `~\.gemini\config\mcp_config.json`，钉死 `CONCORD_REPO_ROOT`。不要创建项目 Gemini CLI 配置。Day-1 不依赖 agy。 |
 | F8 | `concord setup` 改写全局 Codex、覆盖 `AGENTS.md`、或往项目 `.codex/` 塞指令 | P1 | 全局多出 concord；Codex 同时读两套交接规则 | `--no-mcp --no-adapters`；setup 后 kitbak 覆盖 Markdown，`.codex/` 只留 `config.toml`，删除 `.cursor/rules/`（D14）。 |
-| F9 | 中文路径 / 反斜杠 / 无 git 根 | P2 | MCP 找不到 repo | 必须设 `CONCORD_REPO_ROOT=E:/zuhaowan/me/多session`。PowerShell 用 `-LiteralPath`。 |
+| F9 | 中文路径 / 反斜杠 / 无 git 根 | P2 | MCP 找不到 repo | 必须设 `CONCORD_REPO_ROOT=C:/Users/Administrator/Nutstore/1/me/workrtai`。PowerShell 用 `-LiteralPath`。 |
 | F10 | 对端 idle 且无 receipt adapter | P2 | prompt 只进 inbox | `concord adapters status`。Claude 用 `concord-relay`。无 wake 就人工 nudge。 |
 | F11 | 把 CLI-Manager 转换当交接 | P1 | 看起来像续上了，实则单向转写 | AGENTS.md 禁止；HANDOFF 政策禁止。 |
 | F12 | Concord inbox watch flag 与文档不一致 | P2 | monitor 立刻退出 | 以 `concord inbox watch --help` 为准。仅 Grok。 |
@@ -1471,7 +1471,7 @@ Day-1 不需要独立 metrics 后端。看这五层：
 
 验收（必须能打勾）：
 
-- [ ] 在 Project `多session` 的**同一 Workspan** 里至少 Codex + Claude 两个 pane，cwd 均为 `C:\Users\Administrator\Nutstore\1\me\多session`（不要从 `分析招聘` 开）
+- [ ] 在 Project `多session` 的**同一 Workspan** 里至少 Codex + Claude 两个 pane，cwd 均为 `C:\Users\Administrator\Nutstore\1\me\workrtai`（不要从 `分析招聘` 开）
 - [ ] 两边都 `start_work` 后，`inspect_work` 能看见对方（Claude 即使不是 owner 也在场）
 - [ ] Codex 发出一条 Concord prompt，Claude 回复（或记录：Claude 仅 pull，经人工 nudge 后回复）
 - [ ] **不**要求 Grok director / agy 已接线
@@ -1499,7 +1499,7 @@ Day-1 不需要独立 metrics 后端。看这五层：
 kit 配置里的路径一律是占位符 `__CONCORD_REPO_ROOT__`。根目录那份可以写死本机路径。
 
 ```powershell
-$src = 'C:\Users\Administrator\Nutstore\1\me\多session\docs\kit'
+$src = 'C:\Users\Administrator\Nutstore\1\me\workrtai\docs\kit'
 $dst = 'C:\Users\Administrator\Nutstore\1\me\<新任务>'   # 先建文件夹 + CLI-Manager Project（自用，worktree disabled）
 $root = ($dst -replace '\\','/').TrimEnd('/')
 
@@ -1562,7 +1562,7 @@ if (Test-Path .gemini\settings.json) { Remove-Item -Force .gemini\settings.json 
 ### Rollback
 
 ```powershell
-Set-Location -LiteralPath 'C:\Users\Administrator\Nutstore\1\me\多session'
+Set-Location -LiteralPath 'C:\Users\Administrator\Nutstore\1\me\workrtai'
 # 去掉项目 MCP
 Remove-Item -Force .mcp.json, .grok\config.toml, .codex\config.toml -ErrorAction SilentlyContinue
 # 不要依赖项目 .gemini/settings.json；若误创建过也可以删
@@ -1625,7 +1625,7 @@ Markdown 套件可留着当纯 HANDOFF 工作流。
 - **标题：** `chore: wire agy Concord via user-level mcp_config.json`
 - **影响文件：** `C:\Users\22908\.gemini\config\mcp_config.json`（用户级）；`docs/kit/agy.mcp_config.snippet.json`；`TASK.md` roster；**不要**写项目 `.gemini/settings.json`
 - **依赖：** PR-3
-- **说明：** 把 snippet 合并进用户级 `mcp_config.json`，`CONCORD_REPO_ROOT` 钉死 `E:/zuhaowan/me/多session`。换任务夹必须改 env。agy 读 `GEMINI.md`/`AGENTS.md`，但不读项目 Gemini CLI settings。不能被 prompt 则标明 cold-start 角色。Day-1 不依赖本 PR。
+- **说明：** 把 snippet 合并进用户级 `mcp_config.json`，`CONCORD_REPO_ROOT` 钉死 `C:/Users/Administrator/Nutstore/1/me/workrtai`。换任务夹必须改 env。agy 读 `GEMINI.md`/`AGENTS.md`，但不读项目 Gemini CLI settings。不能被 prompt 则标明 cold-start 角色。Day-1 不依赖本 PR。
 
 ### PR-6 — CLI-Manager daemon adapter（Phase 1.5）
 
@@ -1681,7 +1681,7 @@ Markdown 套件可留着当纯 HANDOFF 工作流。
 
 ### Q5. Codex MCP 若忽略项目级 `.codex/config.toml` 怎么办？
 
-- 先做：在 `C:\Users\Administrator\Nutstore\1\me\多session` 启动 Codex，确认 trust 提示选信任，`/mcp` 看 concord。父路径 trusted 不是充分条件。
+- 先做：在 `C:\Users\Administrator\Nutstore\1\me\workrtai` 启动 Codex，确认 trust 提示选信任，`/mcp` 看 concord。父路径 trusted 不是充分条件。
 - **选项 A：** 仍看不到再临时写入 `~/.codex/config.toml`，`CONCORD_REPO_ROOT` 钉死本仓库（换夹要改 env）。
 - **选项 B：** 坚持项目级，升级/等待 Codex 行为。
 - **选项 C：** 只在 Codex 里用 `codex --config` 覆盖启动。
@@ -1724,7 +1724,7 @@ Phase 2 先支持浏览器（Playwright / Browser Use）并保存截图和日志
 - [ ] `start_work` live schema：第一次 **不要** 传入自造 `agent_id`；reviewer presence-only 如何省略 claim、child delegated claim 如何传 scope；哪些字段 required
 - [ ] `update_work` live JSON schema（`operation` / `to_agent_id` / `idempotency_key` = `{cli}-`+SHA256(content)[0:8]，无时间戳）；对端不可达的错误形态
 - [ ] 第一条成功 prompt/reply 后，把真实 `inspect_work` 摘要写入 `docs/stages/` 并回写 AGENTS.md
-- [ ] Codex 在本 cwd 的 trust 提示；0.153.4 是否读取 `C:\Users\Administrator\Nutstore\1\me\多session\.codex\config.toml`；`/mcp` 是否见 concord
+- [ ] Codex 在本 cwd 的 trust 提示；0.153.4 是否读取 `C:\Users\Administrator\Nutstore\1\me\workrtai\.codex\config.toml`；`/mcp` 是否见 concord
 - [ ] Claude 2.1.263 批准 `.mcp.json` 后是否真的连上 stdio `concord-mcp`；`concord adapters install` 后空闲能否被叫醒
 - [ ] Grok：先批准 folder trust，再 `grok inspect` 看 `AGENTS.md` 与 project MCP。同名 server 以 `.grok/config.toml` 替换 `.mcp.json`，不是双进程
 - [ ] `concord inbox watch --provider grok` 的 `--provider` 名称（仅 PR-4，且仅 ≥3 live session 的 Grok director）
@@ -1764,12 +1764,13 @@ Phase 2 先支持浏览器（Playwright / Browser Use）并保存截图和日志
 
 ## Revision Summary
 
-- 2026-09-13：初稿 Draft。基于空工作区 `C:\Users\Administrator\Nutstore\1\me\多session`、CLI-Manager 1.3.8 实装项目、以及 Concord / a2a-bridge 的公开文档。未在本机安装或执行 Concord。
+- 2026-09-13：初稿 Draft。基于空工作区 `C:\Users\Administrator\Nutstore\1\me\workrtai`、CLI-Manager 1.3.8 实装项目、以及 Concord / a2a-bridge 的公开文档。未在本机安装或执行 Concord。
 - 2026-09-13（评审修订）：D13 presence≠claim≠owner；D14 kit `AGENTS.md` 覆盖 `concord setup` 生成块；D15 禁止硬编码 `agent_id`；D16 默认关闭 Concord 遥测。Day-1 PR 重排为 Gate-0 → 套件 → Concord workspace → **Codex↔Claude** → 条件性 Grok director → agy。Grok folder trust、agy 用户级 MCP、显式 `CONCORD_REPO_ROOT`、CLI-Manager 同 Project 开窗、kit `__CONCORD_REPO_ROOT__` 占位符一并写入可执行步骤。
 - 2026-09-13（nits）：`idempotency_key` 改为 `{cli}-`+SHA256(content) 前 8 hex，禁止时间戳；第一次 `start_work` 不传自造 `agent_id`；D14 快照/恢复项目 `.codex/` 并删除 `.cursor/rules/`；复制脚本用 UTF-8 无 BOM；Gate-0 门槛改为 Node **≥ 20**（22/24 合格）。
 - 2026-09-13（用户决议）：Q1=A 只留 Concord（D4）；Q2=C ≥3 live 才开 Grok director（D11/PR-4）；Q3=A 任务夹 git init，`.concord/` ignore，HANDOFF/stages/kit 入库（D17）；Q4=B 右窗 agy + 用户级 MCP，不用官方 Gemini CLI（D18/PR-5）。Q5/Q6 仍开放。
 - 2026-09-14（需求扩展）：明确同时支持模式 A（人指定 B 审查/接力）和模式 B（A 指定 B 为 child Agent 执行并自动回调）。新增 Workbench Bridge / Task Registry、父子任务与结构化完成事件、Session Launcher 适配、浏览器执行器边界、Phase 2 rollout；A2A 顺延为 Phase 3。D3 从“完全不自动委派”改为“人控顶层、主 Agent 受控委派”。
 - 2026-09-14（最终落地修订）：根据 Antigravity Teamwork 引入声明式 Pattern、角色分离、动态 fan-out、质量门、失败知识库和 checkpoint；根据 CLI-Manager 上游 daemon 契约（master commit `8e55b9e`）明确 `auth/list/create/write/attach/output/exit/hook_report` 适配、协议版本协商、CLI-Manager fork 的 Workspan 集成和 Phase 1.5 真实会话验收。最终实现路径为 CLI-Manager fork + Workbench Bridge，sidecar 仅作前期验证。
+
 
 
 
