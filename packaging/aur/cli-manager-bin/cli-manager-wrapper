@@ -1,0 +1,3 @@
+#!/bin/sh
+export CLI_MANAGER_DISTRIBUTION=aur
+exec /usr/lib/CLI-Manager/cli-manager "$@"

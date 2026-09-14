@@ -1,0 +1,484 @@
+/* Dark theme - Night Indigo (default) */
+:root,
+[data-theme="dark"],
+[data-theme="dark"][data-dark-palette="night-indigo"] {
+  --font-ui-sans: "Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-ui-mono: "JetBrains Mono", "Cascadia Mono", "Cascadia Code", "Consolas", "SFMono-Regular", "Courier New", monospace;
+  --bg-primary: #1a1b26;
+  --bg-secondary: #24283b;
+  --bg-tertiary: #1f2335;
+  --text-primary: #c0caf5;
+  --text-secondary: #bec8ef;
+  --text-muted: #7c89bd;
+  --accent: #7aa2f7;
+  --accent-hover: #89b4fa;
+  --border: #3b4261;
+  --danger: #f7768e;
+  --success: #9ece6a;
+  --warning: #e0af68;
+}
+
+/* Dark theme - Forest Night */
+[data-theme="dark"][data-dark-palette="forest-night"] {
+  --bg-primary: #111714;
+  --bg-secondary: #18211c;
+  --bg-tertiary: #1f2a24;
+  --text-primary: #d8e5dc;
+  --text-secondary: #c6d8cd;
+  --text-muted: #8ea79a;
+  --accent: #52a36e;
+  --accent-hover: #66b783;
+  --border: #314238;
+  --danger: #dc6e74;
+  --success: #6bc28f;
+  --warning: #d8b15f;
+}
+
+/* Dark theme - Graphite Red */
+[data-theme="dark"][data-dark-palette="graphite-red"] {
+  --bg-primary: #171616;
+  --bg-secondary: #221f1f;
+  --bg-tertiary: #2a2626;
+  --text-primary: #e6dfdb;
+  --text-secondary: #d2c7c1;
+  --text-muted: #a79a95;
+  --accent: #c95b4a;
+  --accent-hover: #d87060;
+  --border: #3c3434;
+  --danger: #e06a6a;
+  --success: #64b487;
+  --warning: #d3a053;
+}
+
+/* Dark theme - Investment Platform */
+[data-theme="dark"][data-dark-palette="investment-platform"] {
+  --bg-primary: #0f172a;
+  --bg-secondary: #111c31;
+  --bg-tertiary: #172033;
+  --text-primary: #f8fafc;
+  --text-secondary: #dbe7f5;
+  --text-muted: #94a3b8;
+  --accent: #f59e0b;
+  --accent-hover: #fbbf24;
+  --border: #334155;
+  --danger: #f87171;
+  --success: #34d399;
+  --warning: #fbbf24;
+}
+
+/* Dark theme - GitHub Dark */
+[data-theme="dark"][data-dark-palette="github-dark"] {
+  --bg-primary: #24292f;
+  --bg-secondary: #2d333b;
+  --bg-tertiary: #373e47;
+  --text-primary: #f0f3f6;
+  --text-secondary: #c9d1d9;
+  --text-muted: #8b949e;
+  --accent: #58a6ff;
+  --accent-hover: #79c0ff;
+  --border: #444c56;
+  --danger: #ff7b72;
+  --success: #3fb950;
+  --warning: #d29922;
+}
+
+/* Dark theme - Catppuccin Mocha */
+[data-theme="dark"][data-dark-palette="catppuccin-mocha"] {
+  --bg-primary: #1e1e2e;
+  --bg-secondary: #242438;
+  --bg-tertiary: #313244;
+  --text-primary: #cdd6f4;
+  --text-secondary: #bac2de;
+  --text-muted: #9399b2;
+  --accent: #89b4fa;
+  --accent-hover: #b4befe;
+  --border: #45475a;
+  --danger: #f38ba8;
+  --success: #a6e3a1;
+  --warning: #f9e2af;
+}
+
+/* Dark theme - 终端监控绿 (Terminal Green) */
+[data-theme="dark"][data-dark-palette="terminal-green"] {
+  --bg-primary: #0a0a0a;
+  --bg-secondary: #151515;
+  --bg-tertiary: #1d1d1d;
+  --text-primary: #e2e2e2;
+  --text-secondary: #c8c8c8;
+  --text-muted: #8a8a8a;
+  --accent: #3dd68c;
+  --accent-hover: #54e39e;
+  --border: #262626;
+  --danger: #f25e5e;
+  --success: #3dd68c;
+  --warning: #e5c453;
+  /* 卡片浮起：覆盖桥接默认（比背景更暗），避免纯黑背景下卡片塌陷糊成一片 */
+  --surface-container-lowest: #141414;
+}
+
+/* Dark theme - Dracula Purple */
+[data-theme="dark"][data-dark-palette="dracula-purple"] {
+  --bg-primary: #282a36;
+  --bg-secondary: #343746;
+  --bg-tertiary: #44475a;
+  --text-primary: #f8f8f2;
+  --text-secondary: #e6e6dc;
+  --text-muted: #98a4c8;
+  --accent: #bd93f9;
+  --accent-hover: #d6acff;
+  --border: #6272a4;
+  --danger: #ff5555;
+  --success: #50fa7b;
+  --warning: #f1fa8c;
+}
+
+/* Dark theme - Carbon Black */
+[data-theme="dark"][data-dark-palette="carbon-black"] {
+  --bg-primary: #161616;
+  --bg-secondary: #252525;
+  --bg-tertiary: #353535;
+  --text-primary: #f2f4f8;
+  --text-secondary: #dfe3ea;
+  --text-muted: #8d8f94;
+  --accent: #78a9ff;
+  --accent-hover: #8cb6ff;
+  --border: #484848;
+  --danger: #ee5396;
+  --success: #25be6a;
+  --warning: #08bdba;
+}
+
+/* Light theme - Warm Paper (default) */
+[data-theme="light"],
+[data-theme="light"][data-light-palette="warm-paper"] {
+  --bg-primary: #f9f9fb;
+  --bg-secondary: #f2f4f6;
+  --bg-tertiary: #e6e8ec;
+  --text-primary: #2e3336;
+  --text-secondary: #4b5156;
+  --text-muted: #5b6063;
+  --accent: #c46a2d;
+  --accent-hover: #d17a40;
+  --border: #aeb2b6;
+  --danger: #c0323c;
+  --success: #2f8f62;
+  --warning: #b8842a;
+}
+
+/* Light theme - Cream Green */
+[data-theme="light"][data-light-palette="cream-green"] {
+  --bg-primary: #f7faf7;
+  --bg-secondary: #eff4ef;
+  --bg-tertiary: #e2e8e2;
+  --text-primary: #25302a;
+  --text-secondary: #425148;
+  --text-muted: #5f6c66;
+  --accent: #3f7a4f;
+  --accent-hover: #4f8d60;
+  --border: #b1bab4;
+  --danger: #be454f;
+  --success: #2d8a5f;
+  --warning: #a77d2f;
+}
+
+/* Light theme - Ink Red */
+[data-theme="light"][data-light-palette="ink-red"] {
+  --bg-primary: #f7f6f4;
+  --bg-secondary: #f0efec;
+  --bg-tertiary: #e7e5e0;
+  --text-primary: #1f1f1c;
+  --text-secondary: #494943;
+  --text-muted: #7b7b72;
+  --accent: #c43d2f;
+  --accent-hover: #d14f41;
+  --border: #b9b4aa;
+  --danger: #b63a3a;
+  --success: #2b8a5a;
+  --warning: #b07a22;
+}
+
+/* Light theme - Emerald Mist (微冷雾白 + 翡翠绿) */
+[data-theme="light"][data-light-palette="emerald-mist"] {
+  --bg-primary: #fbfdfc;
+  --bg-secondary: #f1f5f3;
+  --bg-tertiary: #e6ece9;
+  --text-primary: #18211d;
+  --text-secondary: #3c4742;
+  --text-muted: #687570;
+  --accent: #039d74;
+  --accent-hover: #0bb085;
+  --border: #d3dcd8;
+  --danger: #c0323c;
+  --success: #2f8f62;
+  --warning: #b8842a;
+}
+
+/* Light theme - SaaS Analytics Dashboard */
+[data-theme="light"][data-light-palette="saas-analytics-dashboard"] {
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #eef4fb;
+  --text-primary: #1e293b;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --accent: #2563eb;
+  --accent-hover: #3b82f6;
+  --border: #d6e0ea;
+  --danger: #dc2626;
+  --success: #0f766e;
+  --warning: #f97316;
+}
+
+/* Light theme - Apple Pure (纯白基底 + SF System Blue) */
+[data-theme="light"][data-light-palette="apple-pure"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f7;
+  --bg-tertiary: #ebebf0;
+  --text-primary: #1d1d1f;
+  --text-secondary: #424245;
+  --text-muted: #6e6e73;
+  --accent: #007aff;
+  --accent-hover: #0a84ff;
+  --border: #d2d2d7;
+  --danger: #ff3b30;
+  --success: #34c759;
+  --warning: #ff9500;
+}
+
+/* Light theme - Apple Mist (微冷雾白) */
+[data-theme="light"][data-light-palette="apple-mist"] {
+  --bg-primary: #fcfcfd;
+  --bg-secondary: #f2f4f7;
+  --bg-tertiary: #e8ebef;
+  --text-primary: #1c1f23;
+  --text-secondary: #40454c;
+  --text-muted: #6b7179;
+  --accent: #0a84ff;
+  --accent-hover: #1f8eff;
+  --border: #dbdfe5;
+  --danger: #e5484d;
+  --success: #2db573;
+  --warning: #f5a524;
+}
+
+/* Light theme - Apple Warm (暖米白纸感) */
+[data-theme="light"][data-light-palette="apple-warm"] {
+  --bg-primary: #fdfcf9;
+  --bg-secondary: #f6f3ed;
+  --bg-tertiary: #eeeae1;
+  --text-primary: #1f1d1a;
+  --text-secondary: #4a4640;
+  --text-muted: #74706a;
+  --accent: #ff9f0a;
+  --accent-hover: #ffaf2e;
+  --border: #e1ddd3;
+  --danger: #d9402b;
+  --success: #2f9e6d;
+  --warning: #c4861a;
+}
+
+/* Light theme - Apple Mono (极简单色) */
+[data-theme="light"][data-light-palette="apple-mono"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f7f7f8;
+  --bg-tertiary: #ededef;
+  --text-primary: #0f0f10;
+  --text-secondary: #3a3a3c;
+  --text-muted: #8a8a8e;
+  --accent: #1d1d1f;
+  --accent-hover: #2c2c2e;
+  --border: #d6d6da;
+  --danger: #c83a30;
+  --success: #2f8f5e;
+  --warning: #b6791d;
+}
+
+/* Digital Atelier semantic tokens (compat layer on top of existing vars) */
+:root,
+[data-theme="dark"],
+[data-theme="light"] {
+  --surface: var(--bg-primary);
+  --surface-container-lowest: color-mix(in srgb, var(--bg-primary) 88%, #000 12%);
+  --surface-container-low: var(--bg-secondary);
+  --surface-container-high: var(--bg-tertiary);
+  --surface-container-highest: color-mix(in srgb, var(--bg-secondary) 78%, var(--border) 22%);
+  --on-surface: var(--text-primary);
+  --on-surface-variant: var(--text-muted);
+  --primary: var(--accent);
+  --on-primary: #ffffff;
+  --primary-dim: color-mix(in srgb, var(--accent) 72%, var(--bg-primary) 28%);
+  --primary-gradient-start: color-mix(in srgb, var(--accent) 85%, #fff 15%);
+  --primary-gradient-end: color-mix(in srgb, var(--accent) 72%, #000 28%);
+  --inverse-surface: #0c0e10;
+  --inverse-on-surface: #e8edf2;
+  --inverse-on-surface-variant: #9aa4af;
+  --interactive-focus-ring: color-mix(in srgb, var(--primary) 28%, transparent);
+  --interactive-default-bg: transparent;
+  --interactive-hover-bg: color-mix(in srgb, var(--surface-container-high) 84%, var(--primary) 16%);
+  --interactive-active-bg: color-mix(in srgb, var(--surface-container-highest) 88%, var(--primary) 12%);
+  --interactive-selected-bg: color-mix(in srgb, var(--surface-container-highest) 72%, var(--primary) 28%);
+  --interactive-selected-border: color-mix(in srgb, var(--primary) 62%, var(--border) 38%);
+  --interactive-disabled-opacity: 0.45;
+  --interactive-shadow: 0 10px 26px color-mix(in srgb, var(--primary) 16%, transparent);
+  --background: var(--surface);
+  --foreground: var(--on-surface);
+  --card: var(--surface-container-lowest);
+  --card-foreground: var(--on-surface);
+  --popover: var(--surface-container-lowest);
+  --popover-foreground: var(--on-surface);
+  --primary-foreground: var(--on-primary);
+  --secondary: var(--surface-container-high);
+  --secondary-foreground: var(--on-surface);
+  --muted: var(--surface-container-high);
+  --muted-foreground: var(--on-surface-variant);
+  --accent-foreground: var(--on-primary);
+  --destructive: var(--danger);
+  --destructive-foreground: #ffffff;
+  --input: color-mix(in srgb, var(--border) 62%, transparent);
+  --ring: var(--primary);
+}
+
+[data-theme="light"] {
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f2f4f6;
+  --surface-container-high: #e6e8ec;
+  --surface-container-highest: #dfe3e7;
+}
+
+/* 项目栏节点外观调色板（issue #213）。只用于图标着色与选中态色条，不做整行背景铺色。
+   暗色取 400 级、亮色取 600 级，保证与 #141414 / #ffffff 的非文本对比度 ≥ 3:1。 */
+:root,
+[data-theme="dark"] {
+  --node-accent-p1: #f87171;
+  --node-accent-p2: #fb923c;
+  --node-accent-p3: #fbbf24;
+  --node-accent-p4: #4ade80;
+  --node-accent-p5: #2dd4bf;
+  --node-accent-p6: #38bdf8;
+  --node-accent-p7: #818cf8;
+  --node-accent-p8: #a78bfa;
+  --node-accent-p9: #f472b6;
+  --node-accent-p10: #94a3b8;
+}
+
+[data-theme="light"] {
+  --node-accent-p1: #dc2626;
+  --node-accent-p2: #ea580c;
+  --node-accent-p3: #b45309;
+  --node-accent-p4: #16a34a;
+  --node-accent-p5: #0d9488;
+  --node-accent-p6: #0284c7;
+  --node-accent-p7: #4f46e5;
+  --node-accent-p8: #7c3aed;
+  --node-accent-p9: #db2777;
+  --node-accent-p10: #475569;
+}
+
+[data-theme="dark"][data-dark-palette="investment-platform"] {
+  --surface-container-lowest: color-mix(in srgb, var(--bg-primary) 88%, #020617 12%);
+  --surface-container-low: color-mix(in srgb, var(--bg-secondary) 90%, #0b1120 10%);
+  --surface-container-high: color-mix(in srgb, var(--bg-tertiary) 92%, #0f172a 8%);
+  --surface-container-highest: color-mix(in srgb, var(--bg-tertiary) 70%, var(--border) 30%);
+  --primary-dim: color-mix(in srgb, var(--primary) 72%, #1e293b 28%);
+  --primary-gradient-start: color-mix(in srgb, var(--primary) 82%, #fef3c7 18%);
+  --primary-gradient-end: color-mix(in srgb, var(--primary) 54%, #8b5cf6 46%);
+  --interactive-focus-ring: color-mix(in srgb, var(--primary) 28%, transparent);
+  --interactive-hover-bg: color-mix(in srgb, var(--surface-container-high) 78%, var(--primary) 22%);
+  --interactive-active-bg: color-mix(in srgb, var(--surface-container-highest) 74%, var(--primary) 26%);
+  --interactive-selected-bg: color-mix(in srgb, var(--surface-container-highest) 58%, var(--primary) 42%);
+  --interactive-selected-border: color-mix(in srgb, var(--primary) 58%, var(--border) 42%);
+  --interactive-shadow: 0 14px 30px color-mix(in srgb, var(--primary) 20%, transparent);
+}
+
+[data-theme="light"][data-light-palette="saas-analytics-dashboard"] {
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f6f9fc;
+  --surface-container-high: #edf3fa;
+  --surface-container-highest: #e2eaf4;
+  --primary-dim: color-mix(in srgb, var(--primary) 76%, #0f172a 24%);
+  --primary-gradient-start: color-mix(in srgb, var(--primary) 78%, #dbeafe 22%);
+  --primary-gradient-end: color-mix(in srgb, #0f172a 20%, var(--warning) 80%);
+  --interactive-focus-ring: color-mix(in srgb, var(--primary) 18%, transparent);
+  --interactive-hover-bg: color-mix(in srgb, var(--surface-container-high) 84%, var(--primary) 16%);
+  --interactive-active-bg: color-mix(in srgb, var(--surface-container-highest) 84%, var(--primary) 16%);
+  --interactive-selected-bg: color-mix(in srgb, var(--surface-container-highest) 62%, var(--primary) 38%);
+  --interactive-selected-border: color-mix(in srgb, var(--primary) 58%, var(--border) 42%);
+  --interactive-shadow: 0 12px 24px color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+/* Apple 系列：纯白扁平、去阴影、focus 收敛 */
+[data-theme="light"][data-light-palette="apple-pure"] {
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #fbfbfd;
+  --surface-container-high: #f5f5f7;
+  --surface-container-highest: #ebebf0;
+  --primary-dim: color-mix(in srgb, var(--primary) 72%, #ffffff 28%);
+  --primary-gradient-start: color-mix(in srgb, var(--primary) 80%, #ffffff 20%);
+  --primary-gradient-end: color-mix(in srgb, var(--primary) 60%, #0a84ff 40%);
+  --interactive-focus-ring: color-mix(in srgb, var(--primary) 22%, transparent);
+  --interactive-hover-bg: color-mix(in srgb, var(--surface-container-high) 88%, var(--primary) 12%);
+  --interactive-active-bg: color-mix(in srgb, var(--surface-container-highest) 86%, var(--primary) 14%);
+  --interactive-selected-bg: color-mix(in srgb, var(--surface-container-highest) 70%, var(--primary) 30%);
+  --interactive-selected-border: color-mix(in srgb, var(--primary) 55%, var(--border) 45%);
+  --interactive-shadow: none;
+}
+
+[data-theme="light"][data-light-palette="apple-mist"] {
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f7f9fc;
+  --surface-container-high: #f2f4f7;
+  --surface-container-highest: #e8ebef;
+  --primary-dim: color-mix(in srgb, var(--primary) 72%, #ffffff 28%);
+  --primary-gradient-start: color-mix(in srgb, var(--primary) 78%, #ffffff 22%);
+  --primary-gradient-end: color-mix(in srgb, var(--primary) 60%, #1f8eff 40%);
+  --interactive-focus-ring: color-mix(in srgb, var(--primary) 20%, transparent);
+  --interactive-hover-bg: color-mix(in srgb, var(--surface-container-high) 88%, var(--primary) 12%);
+  --interactive-active-bg: color-mix(in srgb, var(--surface-container-highest) 86%, var(--primary) 14%);
+  --interactive-selected-bg: color-mix(in srgb, var(--surface-container-highest) 70%, var(--primary) 30%);
+  --interactive-selected-border: color-mix(in srgb, var(--primary) 55%, var(--border) 45%);
+  --interactive-shadow: none;
+}
+
+[data-theme="light"][data-light-palette="apple-warm"] {
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #faf8f3;
+  --surface-container-high: #f6f3ed;
+  --surface-container-highest: #eeeae1;
+  --primary-dim: color-mix(in srgb, var(--primary) 70%, #fdfcf9 30%);
+  --primary-gradient-start: color-mix(in srgb, var(--primary) 80%, #ffffff 20%);
+  --primary-gradient-end: color-mix(in srgb, var(--primary) 60%, #c4861a 40%);
+  --interactive-focus-ring: color-mix(in srgb, var(--primary) 22%, transparent);
+  --interactive-hover-bg: color-mix(in srgb, var(--surface-container-high) 88%, var(--primary) 12%);
+  --interactive-active-bg: color-mix(in srgb, var(--surface-container-highest) 86%, var(--primary) 14%);
+  --interactive-selected-bg: color-mix(in srgb, var(--surface-container-highest) 70%, var(--primary) 30%);
+  --interactive-selected-border: color-mix(in srgb, var(--primary) 55%, var(--border) 45%);
+  --interactive-shadow: none;
+}
+
+[data-theme="light"][data-light-palette="apple-mono"] {
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #fbfbfc;
+  --surface-container-high: #f7f7f8;
+  --surface-container-highest: #ededef;
+  --primary-dim: color-mix(in srgb, var(--primary) 70%, #ffffff 30%);
+  --primary-gradient-start: color-mix(in srgb, var(--primary) 80%, #ffffff 20%);
+  --primary-gradient-end: color-mix(in srgb, var(--primary) 60%, #3a3a3c 40%);
+  --interactive-focus-ring: color-mix(in srgb, var(--primary) 18%, transparent);
+  --interactive-hover-bg: color-mix(in srgb, var(--surface-container-high) 90%, var(--primary) 10%);
+  --interactive-active-bg: color-mix(in srgb, var(--surface-container-highest) 88%, var(--primary) 12%);
+  --interactive-selected-bg: color-mix(in srgb, var(--surface-container-highest) 70%, var(--primary) 30%);
+  --interactive-selected-border: color-mix(in srgb, var(--primary) 55%, var(--border) 45%);
+  --interactive-shadow: none;
+}
+
+[data-theme="light"] {
+  --surface-container-low: color-mix(in srgb, var(--bg-secondary) 95%, white 5%);
+  --surface-container-high: color-mix(in srgb, var(--bg-tertiary) 92%, var(--border) 8%);
+  --surface-container-highest: color-mix(in srgb, var(--bg-tertiary) 76%, var(--border) 24%);
+  --on-surface-variant: color-mix(in srgb, var(--text-secondary) 82%, var(--text-primary) 18%);
+  --interactive-hover-bg: color-mix(in srgb, var(--surface-container-highest) 84%, var(--primary) 16%);
+  --interactive-active-bg: color-mix(in srgb, var(--surface-container-highest) 74%, var(--primary) 26%);
+  --interactive-selected-bg: color-mix(in srgb, var(--surface-container-highest) 60%, var(--primary) 40%);
+  --interactive-selected-border: color-mix(in srgb, var(--primary) 64%, var(--border) 36%);
+  --interactive-shadow: 0 8px 20px color-mix(in srgb, var(--on-surface) 8%, transparent);
+}

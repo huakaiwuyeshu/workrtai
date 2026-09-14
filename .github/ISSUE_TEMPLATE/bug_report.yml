@@ -1,0 +1,103 @@
+name: Bug Report
+description: Report a reproducible CLI-Manager problem.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please keep the report concrete and reproducible.
+
+  - type: input
+    id: app-version
+    attributes:
+      label: CLI-Manager version
+      description: Use the version shown in Settings -> About, or the release tag.
+      placeholder: "Example: V1.2.4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      description: Select the system where the problem happens.
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: terminal-type
+    attributes:
+      label: Terminal type
+      description: Select the affected terminal/runtime.
+      options:
+        - Internal terminal
+        - PowerShell
+        - Windows Terminal
+        - Git Bash
+        - WSL
+        - macOS Terminal
+        - Linux shell
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the actual behavior.
+      placeholder: "What did you do, and what went wrong?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the shortest steps that reproduce the bug.
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. See ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant logs if available.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or screen recordings
+      description: Attach screenshots or recordings if they help explain the problem.
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Anything else that may help locate the issue.
+    validations:
+      required: false

@@ -1,0 +1,18 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "CLI-Manager",
+        "decorations": false,
+        "center": true,
+        "width": 1200,
+        "height": 800,
+        "minWidth": 350,
+        "minHeight": 600,
+        "backgroundColor": "#1a1b26",
+        "visible": false,
+        "dragDropEnabled": true
+      }
+    ]
+  }
+}

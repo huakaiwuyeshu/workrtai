@@ -1,0 +1,103 @@
+name: Bug 反馈（中文）
+description: 提交可复现的 CLI-Manager 问题。
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈问题。请尽量提供可复现、可定位的信息，避免只描述“不能用”。
+
+  - type: input
+    id: app-version
+    attributes:
+      label: CLI-Manager 版本
+      description: 请填写“设置 -> 关于”里显示的版本，或 Release 标签。
+      placeholder: "例如：V1.2.4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: 操作系统
+      description: 请选择问题发生的系统。
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS
+        - Linux
+        - 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: terminal-type
+    attributes:
+      label: 终端类型
+      description: 请选择受影响的终端或运行环境。
+      options:
+        - 内置终端
+        - PowerShell
+        - Windows Terminal
+        - Git Bash
+        - WSL
+        - macOS Terminal
+        - Linux Shell
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 实际表现
+      description: 描述你遇到的问题。
+      placeholder: "你做了什么？实际发生了什么？"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期表现
+      description: 正常情况下应该发生什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请列出能复现问题的最短步骤。
+      placeholder: |
+        1. 打开 ...
+        2. 点击 ...
+        3. 看到 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: 如有相关日志，请粘贴到这里。
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图或录屏
+      description: 如果截图或录屏有助于说明问题，请上传到这里。
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 其他有助于定位问题的信息。
+    validations:
+      required: false

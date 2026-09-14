@@ -1,0 +1,38 @@
+name: 问题咨询（中文）
+description: 咨询 CLI-Manager 的使用或配置问题。
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: 问题
+      description: 请只问一个具体问题。
+      placeholder: "我该如何 ...？"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 背景
+      description: 你想完成什么？已经尝试过什么？
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 相关区域
+      options:
+        - 安装
+        - 终端
+        - 项目管理
+        - 历史会话
+        - AI Replay
+        - 设置
+        - Hooks
+        - 统计分析
+        - 其他
+    validations:
+      required: true

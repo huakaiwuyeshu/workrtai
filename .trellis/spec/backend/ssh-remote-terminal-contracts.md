@@ -1,0 +1,504 @@
+# SSH Remote Terminal Contracts
+
+## 1. Scope / Trigger
+
+Apply this contract when changing SSH host persistence, remote project creation, remote directory queries, terminal launch, PTY/daemon restore, project capability routing, or project sync/import behavior.
+
+SSH projects support remote terminals plus explicit Claude/Codex Agent Hook integration, read-only history, same-source remote resume, Codex remote handoff through cc-connect, and a full remote Git panel routed through the SSH Agent. Local and WSL projects retain their existing capabilities. Remote files, Worktree, historical statistics, provider switching, external terminal launch, and remote resource monitoring remain separate implementations.
+
+## 2. Signatures
+
+### SQLite
+
+```sql
+ssh_hosts(id, name, group_name, host, port, username, config_alias, config_file,
+          auth_mode, identity_file, credential_ref, jump_mode, jump_host_id,
+          proxy_type, proxy_host, proxy_port, proxy_command,
+          connect_timeout_sec, server_alive_interval_sec,
+          server_alive_count_max, terminal_encoding, startup_script, notes,
+          sort_order, created_at, updated_at, group_id)
+
+ssh_host_groups(id, name, parent_id, sort_order, created_at)
+
+projects.environment_type TEXT NOT NULL DEFAULT 'local'
+projects.ssh_host_id TEXT REFERENCES ssh_hosts(id) ON DELETE SET NULL
+projects.remote_path TEXT NOT NULL DEFAULT ''
+projects.cli_config_root TEXT NOT NULL DEFAULT ''
+
+ssh_host_tool_preferences(host_id, source, configured_root, updated_at)
+ssh_agent_tool_integrations(integration_id, host_id nullable, installation_id,
+  remote_machine_id, ssh_user, source, scope_kind, configured_root,
+  canonical_root, config_root_hash, hook_record_json,
+  history_source_instance_id, validation_state, cleanup_state, checked_at)
+```
+
+### Tauri commands
+
+```rust
+pub async fn ssh_client_status() -> SshClientStatus;
+pub async fn ssh_test_connection(spec: SshConnectionSpec, accept_new_host_key: Option<bool>)
+    -> Result<SshConnectionTestResult, String>;
+pub async fn ssh_save_password(host_id: String, password: String)
+    -> Result<String, String>;
+pub async fn ssh_password_status(host_id: String) -> Result<bool, String>;
+pub async fn ssh_delete_password(host_id: String) -> Result<(), String>;
+pub async fn ssh_check_path(spec: SshConnectionSpec, path: String)
+    -> Result<SshPathCheckResult, String>;
+pub async fn ssh_list_directories(spec: SshConnectionSpec, path: String)
+    -> Result<Vec<SshDirectoryEntry>, String>;
+pub async fn ssh_agent_hook_inspect(...) -> Result<HookConfigReport, String>;
+pub async fn ssh_agent_hook_preview(...) -> Result<HookConfigReport, String>;
+pub async fn ssh_agent_hook_apply(...) -> Result<HookConfigReport, String>;
+pub fn ssh_config_default_directory() -> Result<String, String>;
+pub async fn ssh_config_import_preview(config_dir: String)
+    -> Result<SshConfigImportPreview, String>;
+pub async fn cc_connect_handoff_preflight(request: CcConnectHandoffStartRequest)
+    -> Result<(), String>;
+pub async fn cc_connect_handoff_start(request: CcConnectHandoffStartRequest)
+    -> Result<CcConnectHandoffStatus, String>;
+pub async fn cc_connect_handoff_cancel()
+    -> Result<CcConnectHandoffStatus, String>;
+```
+
+### Terminal launch
+
+```rust
+pub struct SshLaunchPlan {
+    pub host_id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub config_alias: String,
+    pub config_file: String,
+    pub auth_mode: String,
+    pub identity_file: String,
+    pub jump_target: String,
+    pub proxy_command: String,
+    pub connect_timeout_sec: u64,
+    pub server_alive_interval_sec: u64,
+    pub server_alive_count_max: u32,
+    pub remote_path: String,
+    pub client_instance_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub bridge_epoch: String,
+    pub agent_path: String,
+    pub agent_installation_id: String,
+    pub agent_remote_machine_id: String,
+    pub tool_source: String,
+    pub environment_overrides: HashMap<String, String>,
+    pub initialization_command: Option<String>,
+    pub startup_command: Option<String>,
+}
+```
+
+`pty_create` and the daemon `ClientFrame::Create` accept an optional structured `ssh_launch`. The frontend resolves the plan but must not build a complete shell-escaped `ssh` command string.
+
+`credential_ref` launches add this internal local-process environment contract:
+
+```text
+interactive PTY: CLI_MANAGER_SSH_ASKPASS_TTY_FALLBACK=1
+background one-shot: CLI_MANAGER_SSH_ASKPASS_TTY_FALLBACK=0
+```
+
+Only the exact value `1` enables control-terminal input. One-shot probes, directory operations, Agent bridges, and other background launches must explicitly set `0` so a parent-process value cannot accidentally enable blocking input. This key is never forwarded to the remote shell.
+
+## 3. Contracts
+
+### Host and project identity
+
+- A host is a reusable machine-local connection asset; a project is a user-visible workspace binding one host to one POSIX remote directory.
+- SSH project identity is `(environment_type = "ssh", ssh_host_id, normalized remote_path)`. Never use the local `path` field to identify an SSH project.
+- Deleting a host sets project `ssh_host_id` to `null`; the project remains visible and must require explicit rebinding before launch.
+- Host grouping is independent from the existing manual project grouping.
+- `ssh_host_groups` owns the editable multi-level SSH host tree. `ssh_hosts.group_name` is legacy display/migration data; new UI should bind by `group_id`.
+- Migration 21 must preserve old flat `group_name` values as root groups and backfill each host's `group_id`.
+- Migration 22 adds `ssh_hosts.config_file TEXT NOT NULL DEFAULT ''`; an empty value means no custom Config file was selected. SSH Config aliases, Agent authentication, and configured jump routes still use the system default Config. Address-based connections without a jump route isolate it with `-F none` only when CLI-Manager fully supplies identity-file, password, credential-reference, or keyboard-interactive authentication.
+
+### Authentication and secrets
+
+- Supported launch modes are `ssh_config`, `agent`, `identity_file`, `credential_ref`, `password_prompt`, and `interactive`.
+- `credential_ref` means Username / Password: SQLite stores only the credential reference, while the secret lives in the platform credential store.
+- Saved SSH passwords must use the shared credential store: Windows Credential Manager, macOS Keychain, or Linux Secret Service. Native WSL support depends on Secret Service availability.
+- OpenSSH receives saved passwords only through the one-shot loopback AskPass helper. The command line, ordinary logs, WebDAV payloads, exports, session snapshots, and normal environment data must not contain the password.
+- AskPass may use the saved credential only for ordinary `password` or `passphrase` prompts. MFA, OTP, one-time password, verification, authenticator, security-code, passcode, and PIN prompts must skip the broker and read the owning SSH control terminal.
+- If the saved-password broker is consumed, expired, or unreachable, an interactive `credential_ref` launch falls back to the same control terminal so the user can correct the password. The helper writes the prompt to the control terminal and writes only the response bytes to helper stdout.
+- Control-terminal fallback is allowed only when `CLI_MANAGER_SSH_ASKPASS_TTY_FALLBACK=1` is explicitly present. Background one-shot launches set it to `0` and must fail quickly without opening `/dev/tty` or `CONIN$`, even if they inherit a control terminal or a parent process exported the value `1`.
+- AskPass broker token input is bounded before comparison. An oversized or mismatched token receives no password response and must not consume the broker; only the first matching token consumes the saved password, or the broker expires after its bounded lifetime.
+- Server-controlled AskPass prompts must normalize CR/LF, remove terminal control characters, and cap terminal output before writing to the owning terminal output; ANSI/OSC/CSI content must not execute in the local terminal.
+- On Windows ConPTY, AskPass manual input/output must reuse the helper's inherited standard input/error handles, because reopening `CONIN$`/`CONOUT$` can bind to a different console queue and disconnect the active SSH authentication session. Helper stdout remains reserved for the response returned to OpenSSH.
+- AskPass helper diagnostics are written to `<logs_dir>/ssh-askpass.log` before Tauri initialization. They may contain only timestamp, process id, prompt category (`password`/`mfa`/`interactive`), route/result, platform, error kind, and byte counts; they must never contain prompt text, password, MFA code, broker token, broker address, or response content. The log is rolling and can be collected together with the normal CLI-Manager log after reproducing an authentication failure.
+- Manual AskPass input disables terminal echo before displaying the prompt, accepts at most 16 KiB, strips trailing CR/LF, and restores the original terminal mode on success, EOF, or error.
+- SSH launch-generated local environment values are protected. Project/session/user environment values, including differently cased Windows keys, must not override `SSH_ASKPASS`, broker address/token, helper dispatch, `DISPLAY`, `SSH_ASKPASS_REQUIRE`, or the TTY fallback policy.
+- Passwords, private-key contents/passphrases, and proxy credentials must not enter SQLite, Tauri store, session snapshots, logs, WebDAV, or local exports.
+- `identity_file` is machine-local and must not be synchronized.
+- `config_file` is machine-local and must not be synchronized, exported, or written to ordinary logs.
+- Host key trust and changed-key blocking remain owned by system OpenSSH.
+
+### SSH Config import
+
+- Native Windows, Linux, and macOS use the current user's `~/.ssh` as the default import directory. WSL config discovery is intentionally unsupported.
+- The import UI may select another directory, but Rust must validate the absolute directory, canonicalize its `config` file, and return stable localized error codes for missing, unreadable, oversized, or invalid UTF-8 input.
+- Discovery imports concrete `Host` aliases only. It supports BOM, CRLF/LF, multiple aliases, recursive `Include`, `~`, environment variables, relative paths, glob expansion, deterministic ordering, depth/file limits, and cycle detection.
+- Wildcard or negated Host patterns are not candidates. Includes inside conditional `Host` or `Match` blocks are skipped with a warning; preview must not run `ssh -G` or establish a network connection.
+- Existing aliases are compared case-insensitively and never overwritten. Selected aliases are inserted in one SQLite transaction and any failure rolls the entire batch back.
+- Completion feedback reports successful, failed, and duplicate-skipped counts. A committed transaction reports zero failures; a rolled-back transaction reports zero successes and all attempted aliases as failed.
+- Imports from the default directory store an empty `config_file`. Imports from a custom directory store the canonical absolute `config` path.
+
+### Remote paths and commands
+
+- Remote project paths are absolute POSIX paths.
+- The remote directory picker treats an empty or whitespace-only browse path as `/` before invoking Rust; backend validation remains strict for non-empty relative or traversal paths, and the UI localizes those validation errors.
+- Reject NUL, CR, LF, relative paths, and any `..` path segment at the Rust boundary.
+- Quote every path and environment value with the dedicated POSIX quoting helper.
+- Environment keys must match shell variable syntax.
+- Directory browsing/check commands use non-interactive `BatchMode=yes` for SSH Config, Agent, and identity-file modes.
+- Every OpenSSH probe, directory query, and terminal launch must add `-F <config_file>` when `config_file` is non-empty. If that file later becomes invalid or unreadable, return an error and never fall back to the default config.
+- A fully structured address-based connection without a jump route must add `-F none` for identity-file, password-prompt, credential-reference, and keyboard-interactive authentication. This prevents an unrelated, malformed, or insecurely-permissioned `~/.ssh/config` from blocking modes whose authentication is fully represented by CLI-Manager.
+- Agent and SSH Config authentication must continue to load the system default Config even for explicit addresses, because the host model does not represent settings such as `IdentityAgent` or general `Host *` rules. A target Config alias or configured jump route also keeps the default Config when no custom `config_file` is selected.
+- HTTP and SOCKS5 proxy URLs are stored as structured `proxy_type`, `proxy_host`, and `proxy_port` fields. The app binary provides the stdio proxy helper used by OpenSSH `ProxyCommand`; users must not need to author a raw command.
+- When a direct HTTP/SOCKS5 proxy is enabled, it takes precedence over `ProxyJump`; do not emit both routes for the same connection.
+- Connection testing must probe a configured HTTP/SOCKS5 proxy as a separate diagnostic stage before starting SSH, and return the sanitized proxy endpoint plus the raw connect/handshake error when that stage fails.
+- Connection testing must run OpenSSH in verbose mode and complete as soon as stderr reports `Authenticated to ...`; it must not wait for a remote command or shell session to exit after authentication succeeds.
+- Username/password testing may try `password` and `keyboard-interactive`, with at most one password prompt, so servers that expose password login through keyboard-interactive are covered without repeated prompts.
+- Username/password terminal launches must allow both `password` and `keyboard-interactive`; the launch path must not use stricter authentication methods than the successful connection-test path.
+- The `__ssh_proxy` helper subcommand must be dispatched before inherited AskPass environment handling; password-authenticated SSH processes pass AskPass variables to ProxyCommand children.
+- The proxy stdio bridge must flush every remote-to-OpenSSH chunk immediately. SSH handshake packets are binary and may be smaller than the Windows stdout buffer; waiting for EOF to flush can deadlock key exchange at `expecting SSH2_MSG_NEWKEYS`.
+- `credential_ref` directory browsing/check commands use `BatchMode=no` plus AskPass. Any AskPass/credential error must be returned; do not silently retry without the password.
+- `password_prompt` and `interactive` modes require a real PTY and must return `ssh_interactive_auth_required` for directory browsing/check commands.
+- A successful launch enters `remote_path`, emits OSC 777 `cli-manager-ssh=connected`, applies environment overrides, runs initialization/startup commands, and finally returns to the user's remote login shell.
+- Remote history resume uses the Agent-verified original cwd. A no-project resume may pass that cwd as the structured SSH `remote_path`; it never becomes a desktop-local cwd.
+- Claude/Codex tool config roots use this priority: SSH project `cli_config_root`, matching `ssh_host_tool_preferences`, then the CLI native default. Native default means no environment variable is injected.
+- Resolve the source only from the SSH project's configured `cli_tool`. Inject `CLAUDE_CONFIG_DIR` for Claude or `CODEX_HOME` for Codex; do not scan or switch remote providers.
+- Absolute POSIX roots use normal POSIX quoting. `~` and `~/...` roots must be rendered with an explicit quoted `${HOME}` prefix so shell expansion occurs without evaluating arbitrary variables or command substitution.
+- Active PTYs capture the root in their launch plan. Editing a Host or project root affects only subsequent launches and never rewrites a running session.
+- Opening an SSH project without an explicit session command resolves its project command as `startup_cmd` first, otherwise `cli_tool + cli_args`; project environment variables follow the same fallback rule. The in-terminal `New Terminal` actions explicitly request an empty command so they open a shell in the same remote directory instead of relaunching the project's CLI. Explicit resume/template commands take precedence, and machine-local provider overrides are not injected into the remote command.
+- SSH startup commands are embedded in `SshLaunchPlan` and executed exactly once by the remote launch command. The frontend may retain the resolved command as session metadata but must not write it again through `pty_write`.
+- A configured initialization/startup command runs inside one login shell, then hands control to a non-login interactive shell that inherits the initialized environment. Do not start a second login shell after the command; repeated MOTD/profile output can bury command output and rerun login side effects.
+
+### PTY, daemon, and restore
+
+- The local OpenSSH process is the PTY root process; xterm rendering remains unchanged.
+- Persist `environmentType`, `sshHostId`, `remotePath`, `connectionState`, and `disconnectReason` in terminal session snapshots.
+- Reopen a live daemon session by attaching to its existing PTY. Never rerun the SSH launch or startup command.
+- An exited daemon session may restore replay and disconnected metadata only.
+- If an older daemon rejects the SSH create frame, fall back to the in-process PTY path; legacy local Create frames remain compatible.
+- Rust removes user-supplied reserved Hook variables and injects `CLI_MANAGER_SSH_HOST_ID`, `CLI_MANAGER_SSH_CLIENT_INSTANCE_ID`, `CLI_MANAGER_PROJECT_ID`, `CLI_MANAGER_TAB_ID`, and `CLI_MANAGER_BRIDGE_EPOCH` from validated launch/session state. `project_name` is desktop-only display metadata and must not be exported to the remote environment.
+- The daemon stores the corresponding Hook binding, including the configured sidebar project name, with the live PTY. Remote events are accepted only when Host/client/project/Tab/epoch/Agent installation/source all match and the session remains alive; only then may the daemon attach the trusted project display name for third-party notification rendering.
+- One daemon Agent bridge is reused for active sessions on the same Host/client/connection identity. PTYs remain independent SSH processes. The last Host session release stops the Hook bridge; probe/install/config operations remain short-lived connections.
+- Remote resume persists `cliSessionId`, history source instance, and history consumer identity with the terminal. The same current-client session jumps to its existing Tab; another consumer is blocked until PTY exit/error/close releases ownership.
+
+### Capability routing
+
+- All SSH feature entry points must consult `resolveProjectCapabilities` or an equivalent hard backend/store guard.
+- SSH project capabilities allow `terminal`, `splitTerminal`, `commandTemplates`, read-only remote `files`, full remote `git` when the Agent advertises `gitFull`, remote `history`, and remote `statistics`; remote Hook state is routed by the dedicated Agent/binding contract rather than by local history/provider capability fallbacks.
+- Switching to an SSH session must not close a supported terminal side panel. Files, Git, history/replay, and statistics remain open after their asynchronous remote load completes in both merged and independent panel layouts.
+- Terminal Git panel identity comes from the registered `Project`: SSH uses trimmed `project.remote_path`, while local/WSL may use the session/Worktree path. An SSH session's empty desktop `cwd`/`project.path` must never produce the Git `no project` state.
+- File panel context identity is environment-specific: local/WSL compare project id plus normalized local/Worktree path; SSH compares project id, Host id, and case-sensitive normalized `remote_path`. Host/root changes must rebuild the remote context, and stale async results must not overwrite the replacement context.
+- While the SSH file or Git context is being built and its first empty snapshot is pending, the panel shows the localized `common.loading` state. It may show an empty result only after the initial request completes.
+- Every SSH file read, including refreshes of already-open files, must carry the captured `SshRemoteFileContext`. If an SSH project has no ready remote context, the file Store returns without invoking any local `file_*` command.
+- Opening session history from an SSH terminal scopes both remote synchronization and cached listing to that project's `remote_path`; the empty desktop-local `path` must never be passed as the history filter or interpreted as all remote projects.
+- A hidden or disabled UI control is not sufficient for files and Worktree: stores must reject SSH projects before invoking local filesystem/Git processes.
+- `findProjectByPath` and other local path matchers must exclude SSH projects and empty local paths.
+- The system resources panel is local-only and must be labelled `Local Resources` / `本机资源` for SSH sessions.
+- SSH provider fields stay null/ignored in the launch plan. Hook inspect/install never reads cc-switch or discovers remote provider data.
+
+### cc-connect remote handoff
+
+- SSH handoff is Codex-only and requires a stopped task, a registered SSH project, and a matching host profile. The `cliSessionId` normally comes from the remote Hook; when it is missing, the desktop may bind it only from a unique, recent SSH Codex history match supplied by the registered remote Agent. SSH Worktrees and WSL sessions remain unsupported.
+- Missing-ID recovery must respect how Codex was launched: an explicit `resume <sessionId>` binds only that ID; `resume --last` binds only the uniquely latest updated matching remote project/source/transport session and does not apply fresh-session creation time; a fresh launch uses terminal/daemon creation time plus recent terminal activity. All modes require non-empty history and an ID not already owned by another open terminal. Interactive picker resume, zero matches, ties, and multiple fresh matches fail closed; the desktop must never guess between remote threads.
+- Handoff authentication must be unattended: SSH Config, Agent, identity file, or `credential_ref`. `password_prompt` and `interactive` must fail before the desktop PTY is suspended.
+- Run `cc_connect_handoff_preflight` before releasing the desktop PTY. It must validate the selected platform conversation, cc-connect version, host/jump/proxy/config references, saved credential, remote directory, and remote Codex app-server startup without loading or resuming the selected thread. Handoff requires an authoritative stopped state: Hook/daemon reports `done` or `failed`, or the PTY reports `exited` or `error`. Missing Hook state fails closed. The managed proxy continues to reject fresh threads and Session ID drift when cc-connect takes ownership.
+- cc-connect keeps its session files in a deterministic local placeholder under the CLI-Manager data directory. The remote POSIX path is transport metadata and must never be passed to local filesystem APIs.
+- The settings-side cc-connect profile is project-neutral. The desktop-pet SSH session supplies the authoritative registered project, host, POSIX work directory, Session ID, and Provider context for handoff; a previously selected local/default project must not participate in SSH target validation or startup.
+- The settings-side cc-connect profile is project-neutral. The desktop-pet SSH session supplies the authoritative registered project, host, POSIX work directory, Session ID, and Provider context for handoff; a previously selected local/default project must not participate in SSH target validation or startup.
+- The managed Codex proxy launches OpenSSH with the same validated transport settings as the SSH terminal, changes to the registered remote directory, exports the project environment plus effective `CODEX_HOME`, injects a scoped `safe.directory`, and starts remote `codex app-server` over stdio.
+- The managed Codex proxy resolves `codex` through the same interactive login-shell environment as the SSH terminal so NVM and equivalent user-managed tool paths remain available. Shell startup stdout must be redirected to stderr until `codex` is executed, then the app-server stdout must be restored to the original SSH stdout; profile banners and initialization output must never enter the JSON-RPC stream.
+- The serialized launch environment may contain only the credential reference. Password values remain in the local credential store and are delivered through the one-shot AskPass broker.
+- During SSH handoff, the proxy rewrites only matching `thread/resume` requests to the registered remote directory and rejects fresh-thread or session-drift requests.
+- Remote app-server turn, approval, completion, and non-retrying error events are converted locally into the existing handoff Hook events. Telegram, Feishu, Weixin, and WeCom therefore share the same progress, permission, completion, and failure notification path without a remote Hook installation.
+- Persist handoff transport, SSH host ID, remote path, and `agent=codex` in the schema-version-2 record. Schema v1 records migrate in memory with Codex as the default; unknown versions fail closed. Adding local Claude/Pi/OpenCode handoff must not widen this SSH Codex-only boundary.
+- On cancellation, re-resolve a structured SSH PTY launch and run `codex resume --no-alt-screen <cliSessionId>` on the same registered host and path. If the project host/path changed, fail closed and keep the recovery lock visible.
+
+### Sync
+
+- Sync/export carries project `environment_type`, `remote_path`, `cli_config_root`, and `ssh_host_id`, plus SSH host groups and portable SSH host profiles.
+- Sync excludes `config_file`, `identity_file`, `credential_ref`, passwords, `proxy_command`, private-key contents, and machine-specific proxy credentials. An existing same-ID host on the destination retains these local-only fields.
+- On a new device, a restored `identity_file` mode without a local key becomes `interactive`; a `credential_ref` mode without a local credential becomes `password_prompt`; a ProxyCommand without a local command is disabled. The host, project path, grouping, address, port, user, Config alias, jump route, structured HTTP/SOCKS5 proxy, timeout, keepalive, encoding, startup script, and notes remain available.
+- Older snapshots without both SSH workspace arrays retain existing destination host tables, and their imported SSH projects remain unbound. SSH project provider/worktree configuration remains subject to the existing machine-specific cleanup.
+
+## 4. Validation & Error Matrix
+
+| Condition | Required result |
+|---|---|
+| OpenSSH missing | Return client-unavailable status and show localized setup guidance; local projects remain usable. |
+| Empty host without config alias | `ssh_host_address_required`. |
+| Port is zero without config alias | `ssh_host_port_invalid`. |
+| Timeout is zero or greater than 300 seconds | `ssh_connect_timeout_invalid`. |
+| Unknown auth mode | `ssh_auth_mode_invalid`. |
+| Identity-file mode without a path | `ssh_identity_file_required`. |
+| Credential-reference mode without a saved credential | `ssh_credential_ref_required`. |
+| AskPass receives an MFA/OTP/verification/PIN prompt in an interactive launch | Skip the saved-password broker and read the owning control terminal with echo disabled. |
+| Interactive AskPass password broker is consumed, expired, or unreachable | Read the password from the owning control terminal; do not retry through an input-less helper. |
+| AskPass needs manual input when `CLI_MANAGER_SSH_ASKPASS_TTY_FALLBACK` is absent, `0`, or any value other than exact `1` | Exit nonzero without opening a control terminal; let the existing one-shot authentication classifier report the failure. |
+| AskPass broker client sends a mismatched token or a token longer than 128 bytes | Close that connection without returning password bytes; keep waiting for the first matching token until the broker deadline. |
+| SSH server sends a prompt containing terminal controls or more than 1024 display characters | Strip controls, normalize line endings, cap display length, and never execute the sequence in the local terminal. |
+| Project/session environment collides with SSH internal AskPass keys, including case variants | Keep the SSH launch-generated value authoritative and preserve unrelated environment values. |
+| AskPass control terminal is unavailable or manual response exceeds 16 KiB | Exit nonzero, restore any changed terminal mode, and never include the response in the error. |
+| Empty password when saving a credential | `ssh_password_required`. |
+| Invalid host id for credential account scoping | `ssh_host_id_invalid`. |
+| Host argument contains NUL/CR/LF | `ssh_launch_argument_invalid`. |
+| Import directory is empty, relative, missing, or not a directory | Return the matching stable `ssh_config_directory_*` error and create no hosts. |
+| Import directory has no readable `config`, or an Include cannot be read/parsed safely | Return the matching stable `ssh_config_*` error and create no hosts. |
+| Custom `config_file` is relative, missing, or no longer a regular file | `ssh_config_file_invalid` or `ssh_config_file_not_found`; do not fall back. |
+| Proxy URL embeds `user:password@host` | `ssh_proxy_credentials_forbidden`. |
+| HTTP/SOCKS5 proxy host is empty or its port is outside 1–65535 | `ssh_proxy_address_invalid`. |
+| Remote path is relative or contains NUL/CR/LF | `ssh_remote_path_invalid`. |
+| Remote path contains a `..` segment | `ssh_remote_path_parent_forbidden`. |
+| Invalid environment key/value | `ssh_environment_key_invalid` or `ssh_environment_value_invalid`. |
+| Tool config root is relative, contains NUL/CR/LF/backslash, `$`, or backticks | `ssh_tool_config_root_invalid`. |
+| Tool config root contains a `..` segment | `ssh_tool_config_root_parent_forbidden`. |
+| Password/MFA directory query | `ssh_interactive_auth_required`; keep manual path input available. |
+| Referenced host missing | Block launch with `ssh_host_not_found`; never fall back to localhost. |
+| Host key changed | OpenSSH blocks the connection; do not auto-ignore the warning. |
+| First connection has no known host key | Return a confirmation-required diagnostic; only an explicit user action may retry with `StrictHostKeyChecking=accept-new`. |
+| SSH transport exits | Persist disconnected/failed state and classified reason; do not interpret remote output as local paths. |
+| Reserved Hook binding is missing/invalid | remote Hook exits successfully as no-op; do not spool or broadcast |
+| Remote event binding does not match a live daemon PTY | reject and log a sanitized warning |
+| Agent installation or remote machine identity changed | refuse Hook config/bridge with `ssh_agent_identity_changed` |
+| SSH Git Agent is missing, incompatible, or lacks `gitFull` | show a localized update/install error; do not render a fake read-only Git panel or call local Git |
+| SSH Git `rootPath` differs from the Launch Plan `remotePath` | `remote_git_root_mismatch`; reject before bridge dispatch |
+| SSH file context is pending or unavailable | keep/show initial loading or the original load failure; never call local `file_*` with the empty desktop `path` |
+| SSH project terminal has `cwd == ""` | resolve the Git panel root from trimmed `project.remote_path` |
+| SSH handoff uses `password_prompt` or `interactive` | Reject with `handoff_ssh_interactive_auth_unsupported` before suspending the desktop session. |
+| SSH handoff saved credential is missing | Reject with `ssh_credential_missing`; never fall back to an interactive prompt. |
+| SSH handoff Host, jump Host, Config file, remote path, or Codex probe is invalid | Preflight fails and the original desktop PTY remains owned locally. |
+| SSH handoff Hook state is unavailable | Reject with `task_state_unknown` unless the PTY is already `exited` or `error`; do not inspect or resume the thread through a second app-server while the desktop Codex process may still own it. |
+| SSH handoff lacks `cliSessionId` | Keep the session visible as a recoverable desktop-pet candidate. Query remote history through the installed Agent and bind only one time-bounded, unowned SSH Codex match; reject missing Agent, missing terminal start identity, zero matches, ambiguity, or concurrent identity drift. |
+| SSH handoff receives a fresh thread or another Session ID | Proxy returns a JSON-RPC error and does not silently create or switch sessions. |
+| SSH handoff is cancelled after project Host/path changes | Keep `recovery_failed` state and require the user to restore the original registration before retrying. |
+
+## 5. Good / Base / Bad Cases
+
+- Good: one host profile backs several SSH projects with distinct remote paths and existing manual project groups.
+- Good: a path such as `/srv/project name/开发` is quoted once, opens correctly, and cannot inject shell syntax.
+- Good: application restart attaches a daemon-owned SSH PTY without repeating initialization commands.
+- Good: Username / Password host can test connection and browse/check a remote path through AskPass without exposing the password.
+- Good: an interactive Username / Password terminal consumes the saved password once, then reads `Please Enter MFA Code.` from the same PTY without exposing or reusing the password.
+- Good: on Windows ConPTY, the MFA prompt is written through AskPass inherited stderr and the code is read through inherited stdin; after authentication the same SSH PTY remains open for the remote shell.
+- Base: an incorrect/consumed saved password falls back to hidden manual password input in the owning interactive PTY.
+- Base: a background one-shot receives an MFA prompt, carries `CLI_MANAGER_SSH_ASKPASS_TTY_FALLBACK=0`, and fails quickly even if a control terminal or parent value `1` was inherited.
+- Good: project `~/state/claude` overrides the Host Claude root and launches with `CLAUDE_CONFIG_DIR="${HOME}"/'state/claude'`.
+- Good: two projects on one Host use independent Tab/epoch bindings while sharing one client/Host Hook bridge; events route only to the originating live Tab.
+- Good: an SSH project waits for its Agent Git context, then routes repository-relative operations through the dedicated Git lane without ever treating `remote_path` as a desktop path.
+- Good: the SSH file tree and Git panel display `加载中…` / `Loading...` until their first remote result is available; refreshing an open remote file still uses the same remote context.
+- Base: no project or Host root exists, so Claude/Codex uses its native default without an injected variable.
+- Base: Hook is not installed; the SSH terminal still runs normally and only live Hook status is unavailable.
+- Good: a host imported from a custom config directory uses the same canonical `config_file` for testing, browsing, and terminal launch.
+- Base: password-prompt/MFA users manually enter a remote path, then authenticate in the real PTY.
+- Base: a host imported from the default `~/.ssh/config` stores an empty `config_file` and lets OpenSSH resolve its normal user config.
+- Base: a manually entered address with no jump route stores an empty `config_file` and runs with `-F none`; unrelated default Config permissions and rules do not participate in that connection.
+- Base: an older snapshot imports an SSH project with an unbound-host warning.
+- Bad: treating `path = ""` as a local project key; on POSIX this can match every local path.
+- Bad: passing a remote POSIX path into local filesystem, Git, Worktree, history, or provider APIs.
+- Bad: selecting LocalGitTransport merely because the SSH Agent context is temporarily null during project switching.
+- Bad: calling `loadProjectFile(project, entry)` from an SSH refresh and thereby treating `project.path == ""` as a local root.
+- Bad: deriving an SSH Git panel root from `session.cwd`, which is intentionally empty for the desktop PTY launch.
+- Bad: falling back to default OpenSSH config after a custom `config_file` is moved or becomes unreadable.
+- Bad: classify `One-time password` as an ordinary password prompt and send the saved login password to the MFA challenge.
+- Bad: decide whether AskPass may block by probing for a control terminal; background one-shot work can accidentally inherit one.
+- Bad: synchronizing passwords, credential references, private-key paths, custom SSH Config paths, or ProxyCommand content.
+- Bad: quoting `~/.claude` as one literal shell token; this disables tilde expansion and points the CLI at a directory named `~`.
+
+## 6. Tests Required
+
+- Run `npx tsc --noEmit`.
+- Run `cargo check` and `cargo test --lib` from `src-tauri`.
+- Assert migration defaults all existing projects to `local` and host deletion nulls remote bindings.
+- Assert SSH group migration preserves legacy flat groups as root `ssh_host_groups` and backfills `ssh_hosts.group_id`.
+- Assert migration 22 gives existing SSH hosts an empty `config_file`.
+- Assert SSH Config discovery handles BOM/CRLF, concrete and wildcard aliases, recursive/glob/conditional Includes, cycles, limits, and Windows path separators.
+- Assert custom `config_file` reaches connection probes and terminal launches through `-F`, missing files fail, and legacy daemon frames deserialize with an empty default.
+- Assert launch-plan validation, POSIX quoting, environment-key validation, proxy credential rejection, jump targets, and legacy daemon frame compatibility.
+- Assert password/interactive/agent modes do not include stale identity-file arguments after auth-mode switches.
+- Assert AskPass serves a saved password only for the matching bounded one-shot token, rejects mismatched/oversized attempts without consuming the broker, requests the broker at most once per prompt, and never uses it for MFA, OTP, one-time password, verification, authenticator, security-code, passcode, or PIN prompts.
+- Assert interactive AskPass falls back to hidden control-terminal input after broker consumption/failure, keeps sanitized prompt output separate from helper stdout, strips CR/LF, filters ANSI/OSC controls, caps prompt/response sizes, and attempts terminal-mode restoration on success, EOF, and error.
+- Assert interactive `credential_ref` launch policy sets `CLI_MANAGER_SSH_ASKPASS_TTY_FALLBACK=1`, one-shot policy explicitly sets `0`, and only exact `1` may invoke control-terminal input.
+- Assert SSH launch-generated AskPass environment keys override project/session values case-insensitively while unrelated environment values survive.
+- Assert remote path checking accepts spaces/Unicode/single quotes and rejects traversal, relative paths, NUL, CR, and LF.
+- Assert project root overrides Host root, Host root overrides native default, and unrelated/local/WSL launches receive no SSH tool-root injection.
+- Assert absolute, `~`, and `~/...` config roots render safely; reject traversal, relative paths, expansion syntax, backslashes, NUL, CR, and LF at the Rust boundary.
+- Assert deleting a Host cascades Host preferences while retaining validated integration identity with `host_id = NULL` and `unbound/retained` state.
+- Assert Rust overwrites reserved binding env, provider launch fields remain null for SSH, one Host bridge serves multiple PTYs, mismatched events are rejected, and the final PTY release stops the bridge.
+- Assert session restore attaches live daemon PTYs and never reruns an exited SSH command.
+- Assert SSH file operations require `SshRemoteFileContext`, Worktree stores reject SSH projects, and local path matching excludes SSH projects.
+- Assert SSH Git context pending/failure cannot invoke local `git_*`, `rootPath` must equal Launch Plan `remotePath`, and missing `gitFull` blocks only the Git panel.
+- Assert terminal Git panel path resolution uses `remote_path` for SSH even when `session.cwd == ""`; initial file/Git loading renders `common.loading`; visible-file refresh passes the remote context into `loadProjectFile`.
+- Assert changing an SSH project's Host or `remote_path` while the file panel is open clears the previous tree, rebuilds `SshRemoteFileContext`, and discards success/failure from the old async load; local/WSL Worktree path comparison remains unchanged.
+- Assert export/import preserves portable host fields and the project host binding, while omitting all secrets and machine-local paths.
+- Assert handoff eligibility accepts SSH Codex sessions only after Hook/daemon reports `done` or `failed`, or the PTY reports `exited` or `error`; unavailable Hook state with a live or unknown PTY fails closed alongside known running states, WSL, SSH Worktrees, missing Hosts, and interactive authentication. Assert missing Session IDs bind an explicit resume target exactly, bind `resume --last` only to the unique latest updated matching session, and bind fresh launches only to one recent non-empty session. Old fresh-launch, local, empty, already-bound, missing, tied, ambiguous, and interactive-picker matches fail closed. Preflight must never load or resume the live thread.
+- Assert SSH handoff launch serialization contains the credential reference but no password, preserves proxy/jump/config settings, safely quotes the remote path/environment, and injects exactly one scoped Git `safe.directory` entry.
+- Assert the SSH Codex command uses an interactive login shell for user-managed PATH discovery while routing shell startup output away from app-server stdout and restoring stdout only for the Codex process.
+- Assert the Codex proxy rewrites the SSH resume cwd, rejects fresh-thread/session drift, forwards protocol lines unchanged otherwise, and maps turn/approval/completion/failure events into the existing handoff notifier.
+- Assert cancellation recreates the SSH PTY through the structured launch resolver and refuses recovery after Host or remote-path drift.
+- Manually verify OpenSSH Agent, private key, password/MFA, first host key, changed host key, ProxyJump, ProxyCommand, network interruption, zh-CN/en-US, and 24-hour time display.
+
+## 7. Wrong vs Correct
+
+### Wrong: infer interactive AskPass from inherited terminal state
+
+```rust
+if control_terminal_exists() {
+    read_mfa_from_terminal();
+}
+```
+
+A background one-shot may accidentally inherit a control terminal and then block forever waiting for input no user can route to it.
+
+### Correct: enable fallback only for the interactive SSH launch
+
+```rust
+let allow_terminal_fallback = env
+    .get("CLI_MANAGER_SSH_ASKPASS_TTY_FALLBACK")
+    .is_some_and(|value| value == "1");
+let broker_response = is_password_prompt(prompt)
+    .then(|| broker_password())
+    .flatten();
+
+match (broker_response, allow_terminal_fallback) {
+    (Some(response), _) => Ok(response),
+    (None, true) => read_terminal(prompt),
+    (None, false) => Err("SSH input unavailable"),
+}
+```
+
+The launch mode owns whether blocking input is legal. Prompt classification owns whether the saved credential may be used.
+
+### Wrong: omit a false policy or let user environment write last
+
+```rust
+if !interactive {
+    env.remove("CLI_MANAGER_SSH_ASKPASS_TTY_FALLBACK");
+}
+ssh_env.extend(user_env);
+```
+
+Removing a key does not clear an inherited parent value, and writing user environment last can replace the helper path or broker token. Windows key comparison is case-insensitive.
+
+### Correct: serialize both policy states and protect launch-owned keys
+
+```rust
+env.insert(
+    "CLI_MANAGER_SSH_ASKPASS_TTY_FALLBACK".into(),
+    if interactive { "1".into() } else { "0".into() },
+);
+user_env.retain(|key, _| {
+    !ssh_env
+        .keys()
+        .any(|protected| key.eq_ignore_ascii_case(protected))
+});
+user_env.extend(ssh_env);
+```
+
+Explicit false survives parent inheritance, while launch-generated secret-channel metadata stays authoritative on every supported platform.
+
+### Wrong: build SSH in the WebView
+
+```ts
+const command = `ssh ${user}@${host} "cd ${remotePath} && ${startupCommand}"`;
+invoke("pty_create", { shell: command });
+```
+
+This mixes UI data with shell syntax, bypasses Rust validation, and makes daemon restore inconsistent.
+
+### Correct: pass a structured launch plan
+
+```ts
+invoke("pty_create", {
+  sshLaunch: {
+    hostId,
+    host,
+    port,
+    username,
+    remotePath,
+    environmentOverrides,
+    startupCommand,
+  },
+});
+```
+
+Rust validates the plan, builds OpenSSH arguments, quotes remote shell values, and uses the same representation for in-process PTY and daemon execution.
+
+### Wrong: rely only on disabled UI
+
+```ts
+if (remote) return <DisabledGitButton />;
+```
+
+### Correct: route and enforce capabilities at both boundaries
+
+```ts
+if (!projectSupportsCapability(project, "git")) return null;
+```
+
+The corresponding store/backend path must also reject SSH projects before any local path operation.
+
+### Wrong: infer Local Git from a missing remote context
+
+```ts
+const transport = remoteContext ? createSshGitTransport(remoteContext) : createLocalGitTransport(path);
+```
+
+### Correct: carry the environment requirement separately
+
+```ts
+const transport = createGitTransport(path, remoteContext, project.environment_type === "ssh");
+```
+
+### Wrong: let an SSH file refresh infer its backend from a missing argument
+
+```ts
+await loadProjectFile(project, entry);
+```
+
+### Correct: preserve the captured remote file context across the refresh
+
+```ts
+if (project.environment_type === "ssh" && !remoteFileContext) return;
+await loadProjectFile(project, entry, remoteFileContext);
+```
+
+### Wrong: quote a tilde root literally
+
+```rust
+format!("export CLAUDE_CONFIG_DIR={}", posix_quote("~/.claude"))
+```
+
+### Correct: expand only the supported HOME shorthand
+
+```rust
+format!("export CLAUDE_CONFIG_DIR=\"${{HOME}}\"/{}", posix_quote(".claude"))
+```
+
+The dedicated validator rejects all other shell expansion syntax before command construction.
+
+### Wrong: copy expanded SSH options into app fields
+
+```ts
+createHost({ host: resolvedHostName, username: resolvedUser, identity_file: resolvedKey });
+```
+
+This freezes machine-specific OpenSSH resolution, risks persisting private configuration, and diverges from future config changes.
+
+### Correct: preserve the OpenSSH reference
+
+```ts
+createHost({
+  name: alias,
+  config_alias: alias,
+  config_file: isDefaultDirectory ? "" : canonicalConfigFile,
+  auth_mode: "ssh_config",
+});
+```
+
+Rust then validates the path and adds `-F <config_file>` consistently for every OpenSSH process.

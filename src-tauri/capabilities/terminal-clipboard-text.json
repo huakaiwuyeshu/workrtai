@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "terminal-clipboard-text",
+  "description": "Allow the main terminal window to write copied terminal text",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "clipboard-manager:allow-write-text"
+  ]
+}

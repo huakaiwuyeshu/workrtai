@@ -1,0 +1,410 @@
+# Tauri Updater Contracts
+
+> Executable contracts for CLI-Manager's Tauri 2 auto-update pipeline across React, Tauri config/capabilities, GitHub Actions release artifacts, and installer restart UX.
+
+## Scenario: Portable build checks updates without installing
+
+### 1. Scope / Trigger
+
+- Trigger: changing distribution detection, updater store branching, About-page update actions, Windows portable packaging, or release asset publishing.
+
+### 2. Signatures
+
+```ts
+type AppDistribution = "standalone" | "portable" | "aur";
+```
+
+```rust
+get_app_version() -> AppVersion // distribution = standalone | portable | aur
+```
+
+- Packaging entry: `scripts/package-portable.ps1 -Version <semver> -SourceDir <release> -OutputDir <dir>`.
+
+### 3. Contracts
+
+- Portable builds still call the signed Tauri updater `check()` API and may show version/date/release notes.
+- Portable builds never call `Update.download()`, `Update.install()`, or `relaunch()` from the updater flow. Their primary action opens the matching GitHub Release page for manual ZIP replacement.
+- Standalone and AUR behavior stays unchanged: standalone downloads/installs/relaunches; AUR skips updater operations and opens the AUR package page.
+- The Windows x64 ZIP contains one `CLI-Manager/` root with `cli-manager.exe`, `cli-manager-codex-proxy.exe`, `portable.flag`, and `resources/`. It must not contain an installer or a user `data-root.json`.
+- The portable ZIP is uploaded to the same draft GitHub Release but is not referenced from `latest.json`; Tauri installer selection must continue using signed installer artifacts only.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Portable update is available | Show “Download Portable Build” and open the version Release page. |
+| Portable check fails | Show the normal signed-manifest error and keep the Release fallback. |
+| Portable action is invoked through `downloadUpdate()` defensively | Return `false`; do not download an installer. |
+| Required executable/resources missing during packaging | Fail the PowerShell script and release job. |
+| Portable artifact missing from the draft release | Fail release asset verification before publishing. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: portable V1.3.5 detects V1.3.6, displays notes, and opens the V1.3.6 Release without starting MSI/NSIS.
+- Base: standalone continues the existing signed download/install/relaunch flow.
+- Bad: treating portable as standalone after version detection and calling the installer.
+- Bad: placing `data-root.json` in the ZIP, which would overwrite a user's portable custom-root pointer on upgrade.
+
+### 6. Tests Required
+
+- Type-check updater distribution branches with `npx tsc --noEmit`.
+- Run the portable packaging script against a release directory and inspect ZIP entries.
+- Release workflow verification must require `CLI-Manager-V<version>-Windows-x64-portable.zip` before publishing.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+if (distribution !== "aur") await update.download();
+```
+
+#### Correct
+
+```ts
+if (distribution !== "standalone") return false;
+await update.download();
+```
+
+---
+
+## Scenario: Official Tauri updater release and install flow
+
+### 1. Scope / Trigger
+
+- Trigger: changes touching update checks, update downloads/install, `src-tauri/tauri.conf.json`, `src-tauri/capabilities/default.json`, updater/process plugins, or release workflow signing env.
+- This is a cross-layer contract because the frontend calls Tauri plugin APIs, the WebView capability grants updater/restart permissions, Tauri config defines signed update endpoints, and GitHub Actions must publish matching `latest.json` / signature artifacts.
+- Do not use the GitHub Releases REST API as the actual auto-update mechanism. GitHub Releases may only be used as a manual fallback link.
+
+### 2. Signatures
+
+Frontend update store surface:
+
+```ts
+interface UpdateState {
+  currentVersion: string | null;
+  checking: boolean;
+  updateAvailable: boolean;
+  updateInfo: UpdateInfo | null;
+  pendingUpdate: Update | null;
+  downloading: boolean;
+  downloadProgress: number;
+  downloadTotalBytes: number | null;
+  downloadedBytes: number;
+  readyToInstall: boolean;
+  installing: boolean;
+  lastCheckedAt: string | null;
+  error: string | null;
+  releaseFallbackUrl: string;
+  fetchVersion(): Promise<void>;
+  checkUpdate(options?: { silent?: boolean }): Promise<UpdateInfo | null>;
+  downloadUpdate(): Promise<boolean>;
+  installAndRelaunch(): Promise<void>;
+  reset(): void;
+}
+```
+
+Tauri updater APIs used by frontend:
+
+```ts
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+
+const update = await check();
+await update.download((event) => { /* progress */ });
+await update.install();
+await relaunch();
+```
+
+Rust plugin registration:
+
+```rust
+.plugin(tauri_plugin_updater::Builder::new().build())
+.plugin(tauri_plugin_process::init())
+```
+
+### 3. Contracts
+
+#### Tauri config
+
+`src-tauri/tauri.conf.json` must include:
+
+```json
+{
+  "bundle": {
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "<Tauri updater public key content>",
+      "endpoints": ["https://github.com/dark-hxx/CLI-Manager/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}
+```
+
+- `pubkey` is public and may be committed.
+- The matching private key must never be committed.
+- Production endpoints must be HTTPS.
+- Windows updater asset strategy is default/MSI; do not set `updaterJsonPreferNsis` unless the installer strategy is intentionally changed.
+
+#### Capability / permissions
+
+`src-tauri/capabilities/default.json` must grant only:
+
+```json
+"updater:default",
+"process:allow-restart"
+```
+
+- Do not grant `process:default` for updater UI.
+- Do not add file-system permissions for updater downloads; Tauri updater owns that flow.
+
+#### Release workflow env
+
+`.github/workflows/release.yml` must pass secrets to `tauri-apps/tauri-action`:
+
+```yaml
+env:
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+with:
+  includeUpdaterJson: true
+```
+
+- `TAURI_SIGNING_PRIVATE_KEY` is required for releases that should auto-update.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is optional and required only when the signing key was generated with a password.
+- The first version that includes updater support still requires manual installation; earlier releases without `latest.json` / `.sig` cannot be consumed by the official updater.
+
+R2-backed releases use one repository variable as the build-time source of truth:
+
+```text
+R2_PUBLIC_BASE_URL=https://downloads.example.com
+  -> TAURI_CONFIG.plugins.updater.endpoints[0]
+  -> VITE_R2_PUBLIC_BASE_URL
+  -> CLI_MANAGER_R2_AGENT_MANIFEST_URL
+  -> rendered install-ssh-agent.sh R2_PUBLIC_BASE_URL
+```
+
+- `R2_PUBLIC_BASE_URL` is required in release workflows and must be an HTTPS origin only: no credentials, path, query, or fragment. A trailing slash is normalized away.
+- `.github/scripts/r2-release-config.mjs` owns validation and derivation. Workflows must not duplicate an exact production hostname check.
+- `TAURI_CONFIG` overrides only updater endpoints during CI builds. The committed updater public key remains static in `tauri.conf.json` and must never come from an Actions variable.
+- `VITE_R2_PUBLIC_BASE_URL` and `CLI_MANAGER_R2_AGENT_MANIFEST_URL` are compile-time values. Local builds without them retain the committed compatibility origin.
+- GitHub Release remains the second updater endpoint and SSH Agent fallback.
+
+#### UX behavior
+
+- Startup update check may run silently after startup readiness; failures must not interrupt first screen or terminal restore.
+- Manual settings-page check may surface errors and retry actions.
+- Download starts only after user clicks the download action.
+- Install/relaunch requires explicit confirmation.
+- If terminal sessions are active, the confirmation must show the active count and warn that tasks may be interrupted; the user may still confirm.
+- Keep a Release-page fallback link for manifest/signature/network failures.
+- AUR-managed installs (`get_app_version().distribution === "aur"`) must skip updater check/download/install and use the AUR package page as the fallback. Package-manager ownership takes precedence over the standalone updater UX.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| No update available | `checkUpdate` returns `null`, sets `lastCheckedAt`, clears stale update state. |
+| Startup check fails | No toast/error interruption; current app continues normally. |
+| Manual check fails | Show a stable, understandable error with retry and Release fallback. |
+| `latest.json` missing or invalid | Treat as update-check failure; do not claim no update. |
+| Signature validation fails | Treat as updater failure; do not install; keep Release fallback. |
+| Download progress has `contentLength` | Show percentage and byte progress. |
+| Download progress lacks total length | Show indeterminate/downloading state, not `NaN`. |
+| Download fails midway | Keep current app usable; allow retry or reset. |
+| Download finished | Set `readyToInstall`; do not install automatically. |
+| Active terminal count > 0 | Show strong warning with count before install/relaunch. |
+| User confirms install | Call `install()` then `relaunch()` only after confirmation. |
+| User chooses later | Keep downloaded/pending state when safe; do not close resources during active download/install. |
+| `R2_PUBLIC_BASE_URL` is missing | Fail the release before compiling or publishing artifacts. |
+| R2 URL is HTTP or contains credentials/path/query/fragment | Fail validation; do not generate `TAURI_CONFIG` or release artifacts. |
+| R2 URL ends with `/` | Normalize it to the origin before deriving endpoint and artifact URLs. |
+| Local non-release build has no R2 variable | Use the committed compatibility origin; keep GitHub fallback. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: release workflow publishes signed updater artifacts; app startup silently detects a new version; settings page displays notes; user downloads; active terminal warning appears; user confirms install/relaunch.
+- Base: GitHub latest release lacks updater JSON; manual check shows failure and the Release fallback link, while terminal sessions continue unaffected.
+- Bad: checking `https://api.github.com/repos/.../releases/latest` and manually comparing `tag_name` for the auto-update path bypasses Tauri's signed updater contract.
+- Bad: granting `process:default` just to relaunch the app expands permissions beyond the updater UI need.
+- Good: changing the Repository Variable updates the next build's updater, Agent manifest, UI install command, and rendered installer together.
+- Base: an already-installed older build continues using its embedded old origin; keep that origin available or redirect it.
+- Bad: fetch an updater hostname from unsigned runtime configuration, or inject the updater public key from Actions variables.
+
+### 6. Tests Required
+
+- TypeScript checks:
+  - `checkUpdate({ silent: true })` must not set user-visible `error` on failure.
+  - Progress math must handle unknown `contentLength` without `NaN`.
+  - `reset()` must close pending updater resources only when not downloading/installing.
+- UI checks:
+  - Settings page renders no-update, checking, update-available, downloading, ready-to-install, installing, and error states.
+  - Active terminal warning includes the count when at least one non-exited/non-error terminal exists.
+  - Install action is unavailable until download is finished and confirmation is visible.
+- Backend/config checks:
+  - `src-tauri/tauri.conf.json` parses and includes `bundle.createUpdaterArtifacts` plus updater endpoint/pubkey.
+  - `src-tauri/capabilities/default.json` includes `updater:default` and `process:allow-restart`, not `process:default`.
+  - `cargo check --manifest-path src-tauri/Cargo.toml` passes after plugin changes.
+- Release checks:
+  - `r2-release-config.test.mjs` rejects missing/HTTP/credential/path/query/fragment values and asserts all derived env values.
+  - Both release workflows run the shared configuration step before compilation and use the rendered installer.
+  - GitHub Actions release has `TAURI_SIGNING_PRIVATE_KEY` available.
+  - Published release includes `latest.json` and signature-backed updater artifacts.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+const response = await fetch("https://api.github.com/repos/dark-hxx/CLI-Manager/releases/latest");
+const latestVersion = (await response.json()).tag_name;
+```
+
+This can notify users, but it is not a signed installable update path.
+
+#### Correct
+
+```ts
+const update = await check();
+if (update) {
+  await update.download(onDownloadEvent);
+  await update.install();
+  await relaunch();
+}
+```
+
+#### Wrong: duplicate the current R2 hostname in workflow validation
+
+```bash
+test "$R2_PUBLIC_BASE_URL" = "https://current-host.example.com"
+```
+
+#### Correct: validate once and derive every build-time consumer
+
+```yaml
+- name: Configure R2 release
+  run: node .github/scripts/r2-release-config.mjs export-actions-env
+```
+
+#### Wrong
+
+```json
+"permissions": ["updater:default", "process:default"]
+```
+
+#### Correct
+
+```json
+"permissions": ["updater:default", "process:allow-restart"]
+```
+
+## Scenario: Target-scoped Tauri configuration features
+
+### 1. Scope / Trigger
+
+- Trigger: adding or moving a Tauri Cargo feature whose enablement must match a platform-specific `tauri.*.conf.json` value, such as `macos-private-api` / `app.macOSPrivateApi`; or adding a Windows native sidecar consumed beside the debug executable during `npm run tauri dev`.
+
+### 2. Signatures
+
+```toml
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "protocol-asset", "devtools"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+```
+
+```json
+// src-tauri/tauri.macos.conf.json
+{ "app": { "macOSPrivateApi": true } }
+```
+
+```text
+# scripts/tauri-cli.mjs, Windows `tauri dev` only
+cargo build --locked --no-default-features --manifest-path <repo>/src-tauri/Cargo.toml \
+  --bin cli-manager --bin cli-manager-codex-proxy [--target <triple>] [--release] \
+  [--profile <name>] [--target-dir <path>]
+```
+
+### 3. Contracts
+
+- Configuration-sensitive Tauri features must be declared under the same Cargo target that owns the corresponding platform config.
+- Windows and Linux direct Cargo commands must not activate `macos-private-api`.
+- macOS builds must activate `macos-private-api` and keep `app.macOSPrivateApi = true`.
+- Tests must exercise the real Cargo invocation; do not inject a synthetic `TAURI_CONFIG` merely to suppress the consistency error.
+- On Windows, the `scripts/tauri-cli.mjs` `dev` entrypoint must build `cli-manager` and `cli-manager-codex-proxy` before spawning Tauri. The proxy is required because remote Codex handoff resolves `current_exe().with_file_name("cli-manager-codex-proxy.exe")`; selecting both binaries in one Cargo invocation lets the shared library build graph be reused.
+- The proxy prebuild must use the same `--no-default-features` development feature selection as Tauri's Cargo invocation, in addition to forwarding explicit feature selection arguments when supplied.
+- The proxy prebuild must mirror the `TAURI_CONFIG` JSON merge value generated by the selected `--config`/`-c` extension so `tauri-build` sees the same Cargo fingerprint input before Tauri starts.
+- The prebuild must forward both `--target <triple>` / `--target=<triple>` and `-t <triple>` / `-t=<triple>` as Cargo's `--target <triple>`.
+- Tauri's first `--` starts Cargo runner arguments; only the second `--` starts application arguments. The prebuild must inspect Tauri options and runner arguments, forward `--release`, `--profile`, and `--target-dir`, and ignore everything after the second boundary.
+- A failed or unavailable Cargo prebuild must return a non-zero exit and must not start Tauri. Non-Windows platforms and non-`dev` Tauri commands must not run this prebuild.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| `macos-private-api` is in common dependencies | Reject: Windows/Linux direct Cargo builds can fail Tauri feature/config consistency checks. |
+| macOS target feature is missing | Reject: macOS transparent/private-API window behavior loses its required Cargo capability. |
+| macOS feature exists but `macOSPrivateApi` is false/missing | Reject through the existing macOS window-controls verification. |
+| Common and target dependency declarations are correctly split | Windows/Linux resolve only common features; macOS additionally resolves `macos-private-api`. |
+| Windows `tauri dev` without a target | Build the main binary and proxy into Cargo's default debug target before Tauri starts, including the selected `TAURI_CONFIG` fingerprint input. |
+| Windows `tauri dev` with either target syntax | Build both selected binaries for the same target triple before Tauri starts. |
+| Windows `tauri dev --release` | Build both selected binaries in the release profile before Tauri starts. |
+| Windows runner arguments select `--profile`, `--target-dir` or features | Forward the selection to the proxy Cargo build. |
+| Application arguments after the second `--` resemble Cargo options | Ignore them when selecting the proxy build target/profile/directory. |
+| Windows proxy Cargo build fails | Return Cargo's non-zero result and do not invoke Tauri. |
+| Non-Windows or a non-`dev` Tauri command | Do not build the Windows proxy. |
+
+### 5. Good / Base / Bad Cases
+
+- Good: Windows Codex proxy E2E calls `cargo build --locked` directly and succeeds without platform-config overrides.
+- Base: normal Tauri CLI builds continue merging the platform config and resolve the same target-specific feature set.
+- Bad: set `TAURI_CONFIG` inside one test to claim success while the manifest still enables a macOS-only feature globally.
+- Good: `npm run tauri dev -- --target x86_64-pc-windows-msvc` completes the main/proxy prebuild before launching the dev process, and a second unchanged launch lets Cargo reuse both artifacts.
+- Bad: rely on Cargo's `default-run = "cli-manager"` and launch Tauri without compiling the separately consumed proxy binary.
+
+### 6. Tests Required
+
+- Inspect `cargo metadata --no-deps` and assert the common `tauri` dependency excludes `macos-private-api` while the macOS-target dependency includes it.
+- Run `npm run test:codex-proxy:e2e` on Windows.
+- Run `cargo check --locked --manifest-path src-tauri/Cargo.toml`.
+- Run `node scripts/verify-macos-window-controls.mjs`.
+- Run `npm run test:tauri-dev-proxy` on Windows. Assert Cargo runs before Tauri, both binaries and `--no-default-features` are selected, the `TAURI_CONFIG` merge value is mirrored for file and inline config, feature/target forwarding covers Tauri and runner long/short forms, release/profile/target-dir respect both `--` boundaries, Cargo failure prevents Tauri launch, and `build` does not prebuild the proxy.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```toml
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+```
+
+#### Correct
+
+```toml
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "protocol-asset", "devtools"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+```
+
+#### Wrong
+
+```js
+spawn("tauri", ["dev", ...args]);
+```
+
+#### Correct
+
+```js
+const proxyBuildCode = await buildWindowsDevProxy(tauriArgs);
+if (proxyBuildCode !== 0) process.exitCode = proxyBuildCode;
+else spawn("tauri", tauriArgs);
+```

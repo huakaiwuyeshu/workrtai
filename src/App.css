@@ -1,0 +1,94 @@
+@import "tailwindcss" source("./");
+@import "@xterm/xterm/css/xterm.css";
+@import "./styles/animations.css";
+@import "./styles/themes.css";
+@import "./styles/base.css";
+@import "./styles/components.css";
+@import "./styles/workspace-layout.css";
+@import "./styles/workspace-layout-controls.css";
+
+/* @xterm/xterm 6.1.0-beta.288 still creates this DOM fallback but omits its hiding rule. */
+.xterm .xterm-char-measure-element {
+  display: inline-block;
+  visibility: hidden;
+  position: absolute;
+  top: 0;
+  left: -9999em;
+  line-height: normal;
+}
+
+/* Design Tokens — Tailwind CSS 4 @theme */
+@theme {
+  --color-bg-primary: var(--bg-primary);
+  --color-bg-secondary: var(--bg-secondary);
+  --color-bg-tertiary: var(--bg-tertiary);
+  --color-surface: var(--surface);
+  --color-surface-container-low: var(--surface-container-low);
+  --color-surface-container-lowest: var(--surface-container-lowest);
+  --color-surface-container-high: var(--surface-container-high);
+  --color-surface-container-highest: var(--surface-container-highest);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-on-surface: var(--on-surface);
+  --color-on-surface-variant: var(--on-surface-variant);
+  --color-on-primary: var(--on-primary);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-primary: var(--primary);
+  --color-primary-dim: var(--primary-dim);
+  --color-primary-gradient-start: var(--primary-gradient-start);
+  --color-primary-gradient-end: var(--primary-gradient-end);
+  --color-inverse-surface: var(--inverse-surface);
+  --color-inverse-on-surface: var(--inverse-on-surface);
+  --color-inverse-on-surface-variant: var(--inverse-on-surface-variant);
+  --color-border: var(--border);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --font-sans: var(--font-ui-sans);
+  --font-mono: var(--font-ui-mono);
+
+  --font-size-ui: 13px;
+  --font-size-app-title: calc(var(--font-size-ui) + 2px);
+  --font-size-section-title: var(--font-size-ui);
+  --font-size-body: var(--font-size-ui);
+  --font-size-meta: calc(var(--font-size-ui) - 1px);
+  --font-size-micro: calc(var(--font-size-ui) - 2px);
+  --text-xs: var(--font-size-meta);
+  --text-sm: calc(var(--font-size-ui) + 1px);
+  --text-base: calc(var(--font-size-ui) + 3px);
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --line-height-body: 1.55;
+  --line-height-meta: 1.45;
+
+  --animate-duration-fast: 150ms;
+  --animate-duration-normal: 250ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-snappy: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  --animate-fade-in: fade-in var(--animate-duration-normal) var(--ease-standard);
+  --animate-fade-out: fade-out var(--animate-duration-normal) var(--ease-standard);
+  --animate-slide-down: slide-down var(--animate-duration-fast) var(--ease-standard);
+  --animate-scale-in: scale-in var(--animate-duration-normal) var(--ease-snappy);
+  --animate-scale-out: scale-out var(--animate-duration-fast) var(--ease-standard);
+}

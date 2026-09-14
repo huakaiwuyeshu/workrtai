@@ -1,0 +1,35 @@
+name: Feature Request
+description: Suggest a focused improvement for CLI-Manager.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep the request focused. A small feature with a clear use case is easier to ship.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What pain point or workflow gap should this solve?
+      placeholder: "I need ... because ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful behavior.
+      placeholder: "Add ... so that ..."
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots, examples, or links that clarify the request.
+    validations:
+      required: false

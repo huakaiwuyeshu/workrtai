@@ -1,0 +1,1135 @@
+# CLI Hook Contracts
+
+Concrete contracts for Claude/Codex/Kimi/Pi/Grok/OpenCode hook integration.
+
+## Scenario: Local Hook Source Admission
+
+### 1. Scope / Trigger
+
+- Trigger: adding a local CLI Hook source or extending its installed event modules.
+- Applies to: Hook installation, the hidden `__hook` client, local HTTP bridge validation, frontend source typing, and realtime session binding.
+
+### 2. Signatures
+
+```text
+<cli-manager-exe> __hook --source <claude|codex|kimi|pi|grok|opencode> --event <event> [--owner <owner-id>]
+normalize_source(source: Option<&str>) -> &str
+is_valid_payload(payload: &ClaudeHookRequest) -> bool
+```
+
+### 3. Contracts
+
+- A Hook source is supported only when the installer, `__hook` client, HTTP receiver, frontend `CliHookSource`, and realtime binding all recognize the same source value. Hook support and history support are independent capabilities. Local Kimi history (list/delete/resume/realtime stats) is supported for `$KIMI_CODE_HOME` / `~/.kimi-code`; SSH Kimi history remains unsupported and must stay excluded from remote history types and RPCs. Legacy `~/.kimi` is never treated as a history source. Local Grok history (list/delete/resume/realtime stats) is supported for `$GROK_HOME` / `~/.grok/sessions`; SSH Grok is a CLI/Hook source only and remains excluded from remote history types and RPCs.
+- `normalize_source` preserves `grok`; unknown explicit values normalize to an empty value and are rejected.
+- Grok installer maps approval attention to `PreToolUse` with matcher `Bash|Edit|Write|MultiEdit`, then reports it as `PermissionRequest`; Grok 0.2.111 does not expose a native `PermissionRequest` hook and `Notification` is not an approval event.
+- Grok accepts `SessionStart`, `UserPromptSubmit`, legacy `Notification`, `PermissionRequest`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `AgentToolStart`, `AgentToolStop`, `ToolStart`, and `ToolStop`. Uninstalling the attention module must remove only its `PreToolUse -> PermissionRequest` command and preserve `ToolStart`/sub-agent hooks sharing the same native event.
+- Grok `permissionMode=bypassPermissions` suppresses the synthetic approval notification; `auto` does not, because dangerous tools may still require approval.
+- Grok hook stdin may use camelCase `sessionId` and `transcriptPath`; shared hook normalization must preserve them.
+- Invalid source/event pairs return HTTP 400 and never reach frontend or third-party notification sinks. The hidden Hook process still exits successfully so a bridge failure cannot interrupt the CLI.
+- OpenCode uses a marker-owned global plugin instead of the hidden `__hook` command. It posts only `SessionStart`, `UserPromptSubmit`, `Stop`, and `StopFailure` with the native OpenCode session ID; missing callback environment is a no-op and an unowned same-name plugin is never overwritten.
+- During a local cc-connect handoff, the managed process tree receives only the daemon port/token and handed-off Tab ID owned by CLI-Manager. Notification admission additionally requires the Hook source to equal the persisted Agent (`claude`, `codex`, `pi`, or `opencode`) and the optional CLI Session ID to match. A different Agent, Tab, or Session cannot update or notify the active handoff.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|-----------|-------------------|
+| Known source + allowed event | Accept, normalize, and route the payload. |
+| Known source + unknown event | HTTP 400; no notification delivery. |
+| Unknown explicit source | Normalize to empty, HTTP 400. |
+| Missing source | Preserve the legacy Claude default. |
+| Grok camelCase session id | Bind the normalized session id when present. |
+| OpenCode marker-owned plugin event | Accept only the four session lifecycle events and bind its exact native session ID. |
+| OpenCode same-name unowned plugin | Return `opencode_hook_conflict` and preserve existing bytes. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: Grok displays a successful Hook execution and CLI-Manager receives the event under `source=grok`.
+- Base: Claude, Codex, and Pi keep their existing event sets and routing behavior.
+- Bad: the installer writes `--source grok`, but `normalize_source` or `is_valid_payload` omits Grok, causing every request to be silently discarded after Hook execution.
+
+### 6. Tests Required
+
+- Rust unit test that every installed Grok event passes `is_valid_payload` and an unknown event fails.
+- Rust unit test that OpenCode lifecycle events pass source admission and that generated plugin source contains no embedded credentials.
+- Hook-schema unit test that Grok camelCase `sessionId` is normalized.
+- Run `cargo check` after changing source admission or payload fields.
+- Manual desktop check: start an internal Grok terminal, confirm SessionStart binds the session, then confirm Stop and an approved dangerous-tool `PermissionRequest` reach CLI-Manager.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+// Installer supports Grok, but the HTTP receiver still rejects it.
+match normalize_source(payload.source.as_deref()) {
+    "claude" => validate_claude_event(&payload.event),
+    _ => false,
+}
+```
+
+#### Correct
+
+```rust
+match normalize_source(payload.source.as_deref()) {
+    "claude" | "grok" => validate_claude_compatible_event(&payload.event),
+    _ => false,
+}
+```
+
+## Scenario: Local Hook Retry, Deduplication, And Safe Tab Binding
+
+### 1. Scope / Trigger
+
+- Trigger: a local Hook may outlive its PTY environment, hit a transient daemon restart, or arrive from an external CLI without a current Tab ID.
+- Applies to: `hook_client`, local HTTP admission, frontend Hook target resolution, split panes, Workspan, Worktree, and WSL paths.
+
+### 2. Signatures
+
+```text
+remoteEventId: UUID string, optional for backward compatibility, 1..128 bytes when present
+resolveCliHookTarget(input) -> { tabId, reason } | null
+```
+
+### 3. Contracts
+
+- One Hook invocation creates one `remoteEventId`; every retry reuses that ID.
+- The client tries the complete PTY environment target first, then the current daemon discovery target when it differs, with two bounded attempts and no CLI-visible failure.
+- The receiver keeps a bounded recent-ID set and returns success for duplicates without invoking frontend or third-party sinks again. Legacy requests without an ID remain accepted and are not deduplicated.
+- Binding order is exact Tab ID, valid legacy primary mapping, existing session owner, unique source/path candidate, then one recently active candidate. Ambiguous candidates are rejected.
+- Windows drive and `/mnt/<drive>` paths compare as one local path; `\\wsl$`/`\\wsl.localhost` and Linux paths compare only within the same WSL distro. Local events never bind SSH tabs.
+- Realtime stats continue to query only an explicitly bound session ID; project-latest history is not a recovery mechanism.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Missing `remoteEventId` | Accept as legacy; do not deduplicate. |
+| Empty or longer than 128 bytes | HTTP 400; no sink delivery. |
+| Duplicate valid ID | HTTP success; zero additional sink deliveries. |
+| Stale PTY daemon target | Try current discovery target. |
+| One compatible local candidate | Bind and refresh stats. |
+| Multiple candidates without one recent PTY owner | Keep unbound and log a diagnostic. |
+| SSH candidate for local event | Exclude it. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: an old Grok process uses a stale port, discovery finds the current daemon, and its unique Worktree terminal binds.
+- Base: a current in-app terminal uses its exact Tab ID and keeps existing behavior.
+- Bad: two same-source panes exist and the event is assigned to the project-latest session; this risks cross-pane data leakage and is forbidden.
+
+### 6. Tests Required
+
+- Rust: duplicate IDs deliver once; invalid IDs are rejected; Hook receiver tests pass.
+- TypeScript/Node: exact priority, unique external binding, recent-output disambiguation, ambiguity refusal, Windows/WSL normalization, and SSH exclusion.
+- Run `npx tsc --noEmit`, Rust check/test, and `git diff --check`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+return candidates[0];
+```
+
+#### Correct
+
+```ts
+return candidates.length === 1 ? candidates[0] : null;
+```
+
+## Scenario: Current Kimi Code TOML Hook Adapter
+
+### 1. Scope / Trigger
+
+- Trigger: managing Kimi Code Hooks locally, in WSL, or through the SSH Agent.
+- Applies only to the current Kimi Code product using `$KIMI_CODE_HOME/config.toml` (default `~/.kimi-code/config.toml`). Legacy `kimi-cli` and `~/.kimi` are unsupported and never migrated.
+
+### 2. Event and module contract
+
+| UI module | Native event | Bridge event | State/notification |
+|---|---|---|---|
+| sessionStart | `SessionStart` | `SessionStart` | bind only |
+| running | `TurnStarted` | `UserPromptSubmit` | running |
+| attention | `PermissionRequest` | `PermissionRequest` | attention + configured notification |
+| attention | `PermissionResult` | `PermissionResult` | running; no toast/taskbar/system notification |
+| stop | `Stop` | `Stop` | done + configured notification |
+| stop | `Interrupt` | `Interrupt` | clear to none; no success/failure notification |
+| failure | `StopFailure` | `StopFailure` | failed + configured notification |
+| subagent | `SubagentStart` | `SubagentStart` | generic binding/notification/Replay only |
+| subagent | `SubagentStop` | `SubagentStop` | generic binding/notification/Replay only |
+
+- Attention installs/removes both permission definitions atomically; Stop installs/removes both completion/interruption definitions atomically; Subagent installs/removes both definitions atomically.
+- Kimi Subagent payloads have no stable transcript identity. `agent_name` is display metadata only; Kimi events must not enter `openSubagentTranscript` or create/merge transcript split panes.
+- `SessionEnd`, heartbeat, task, tool, and compact events are not installed or admitted for Kimi in this stage.
+
+### 3. Config ownership and writes
+
+- Parse and mutate `[[hooks]]` with `toml_edit`; preserve comments, ordering, unknown fields, user Hooks, and third-party Hooks.
+- Kimi's schema permits only `event`, `matcher`, `command`, and `timeout`; do not add an ownership field to the table.
+- Managed commands carry an exact `--owner cli-manager-local` or `--owner cli-manager-ssh-agent:<installation-id>` argument. Ownership requires exact parsed executable/`__hook`/source/event/owner tokens with no unknown suffix; substring matches never establish ownership.
+- An exact owner family/source/event/native matcher with an old executable or installation identity is outdated and may converge on explicit install. An exact owner token with inconsistent source/event/matcher is a conflict. Similar user commands are untouched.
+- Local status/install treat `config.toml` as the Hook state authority and must not discover or execute the Kimi CLI, `kimi doctor --help`, or `kimi doctor config`; this keeps status refresh and installation independent from CLI availability and external-process latency. Install writes a same-directory candidate, revalidates the live input, and atomically replaces it. Any parse, ownership-conflict, revalidation, or replace failure preserves the original file. The SSH Agent remains a separate remote boundary and continues to require current-product doctor capability plus candidate validation.
+- A local custom config root controls Hook management only. CLI-Manager does not inject `KIMI_CODE_HOME` into local terminal launches. New Kimi sessions reload config automatically; an active TUI requires `/reload`.
+- Hidden Hook delivery remains fail-open for the target CLI: bridge failures write only redacted diagnostics and the hidden process exits `0`; this does not claim that delivery succeeded.
+
+### 4. History boundary
+
+- Kimi is a Hook source but not a `SshHistorySource`. It must not start history sync/preflight/resume, write `history_source_instance_id`, or select a Claude/Codex parser.
+- A Kimi SSH Hook installation record has no `historySourceCandidate`; Claude/Codex records still require one with the same source/root/hash.
+
+### 5. Tests Required
+
+- Assert all nine installed Kimi definitions pass source/event admission; unknown Kimi events fail HTTP admission.
+- Assert `PermissionRequest -> PermissionResult` and running/attention `-> Interrupt` close the frontend state without completion/failure notifications.
+- Assert local status and first install work without a Kimi executable or doctor subprocess, while atomic-failure preservation, invalid TOML, exact ownership, similar-command isolation, duplicate convergence, and module uninstall remain covered. SSH Agent tests continue to assert current-product doctor capability and candidate validation.
+- Assert Kimi Subagent events bind and enter Replay without opening a transcript split pane.
+- Assert SSH Kimi remains rejected by every remote history entry point. Local/WSL Kimi history list/delete/resume/realtime stats are covered by history-index and history-session contracts.
+- Source-inspecting frontend lifecycle tests must normalize CRLF to LF before applying LF-structured regular expressions. The SSH Agent Kimi TOML planner test uses real canonical paths and must run under Unix path semantics; non-Linux hosts still compile the Agent test target for Linux rather than weakening canonical-root validation.
+
+## Scenario: Per-Tool Hook Bridge Enablement
+
+### 1. Scope / Trigger
+
+- Trigger: users may install only Claude Code or only Codex CLI, so the unused bridge must not keep the shared Hook health indicator in a warning state.
+- Applies to: persisted frontend settings, Hook settings UI, sidebar health/reinstall behavior, stats availability checks, Claude auto-repair, and terminal Hook environment injection.
+
+### 2. Signatures
+
+```ts
+interface Settings {
+  claudeHookBridgeEnabled: boolean;
+  codexHookBridgeEnabled: boolean;
+  kimiHookBridgeEnabled: boolean;
+}
+```
+
+- Per-tool bridge settings, including Kimi, default to `true`; their config roots remain local-only settings.
+- Backend `hook_settings_get_status` keeps its existing signature; frontend callers gate `autoRepair` and interpret the returned per-tool status through the enable settings.
+
+### 3. Contracts
+
+- Disabled tools are excluded from the sidebar Hook health aggregation and one-click reinstall target list.
+- A disabled tool keeps only its settings-section header, enable switch, and status pill visible; module cards, paths, install notes, and install/remove actions are not rendered until the bridge is enabled again.
+- When both tools are disabled, the sidebar light is neutral/gray and clicking it only opens Hook settings.
+- Claude auto-repair may be requested only when `claudeHookBridgeEnabled && claudeHookAutoRepairKnownInstalled`.
+- Stats availability is true only when at least one enabled tool reports `status === "installed"`.
+- New terminals inject the shared Hook bridge environment only when at least one enabled tool reports `status === "installed"`.
+- Disabling a bridge does not uninstall or rewrite existing user Hook files.
+
+### 4. Validation & Error Matrix
+
+| Condition | Behavior |
+|-----------|----------|
+| Stored enable value is missing/invalid | Use default `true` |
+| Claude disabled, Codex installed/enabled | Health is green; no Claude auto-repair |
+| Codex disabled, Claude installed/enabled | Health is green; Claude auto-repair may run when previously installed |
+| All bridges disabled | Neutral light; no reinstall; no Hook env injection |
+| Enabled tool status request fails | Preserve existing caller error handling; do not assume installed |
+| A saved config directory is missing during status inspection or another tool's action | Report that tool as missing; do not fail the shared status request or block the target tool's action |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a Claude-only user disables Codex and gets a green health light when Claude is fully installed.
+- Good: disabling Codex immediately collapses its detail content; enabling it again restores the detail content from the existing status and local UI state.
+- Base: an existing user upgrades with no stored enable settings; both bridges remain enabled.
+- Bad: a disabled Codex bridge remains part of the shared health aggregation and keeps the light yellow.
+- Bad: disabling Claude still sends `autoRepair: true` and rewrites Claude settings.
+
+### 6. Tests Required
+
+- TypeScript type-check after settings fields, migration, or status filtering changes.
+- Manual settings persistence check across restart for both switches.
+- Manual settings UI check: disabling either bridge collapses only that bridge's detail content and enabling it restores the content.
+- Manual health matrix: Claude-only, Codex-only, both enabled, both disabled, and partial enabled installation.
+- Manual terminal check: both disabled must not inject the Hook bridge environment into new PTY sessions.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+return status.claude.status === "installed" || status.codex.status === "installed";
+```
+
+#### Correct
+
+```ts
+return (
+  (settings.claudeHookBridgeEnabled && status.claude.status === "installed") ||
+  (settings.codexHookBridgeEnabled && status.codex.status === "installed")
+);
+```
+
+## Scenario: Windows Taskbar Attention And Disabled-Bridge Status Visibility
+
+### 1. Scope / Trigger
+
+- Trigger: a supported Hook event arrives while the Windows main window is not focused, or the user inspects Hook installation after disabling one or more bridges.
+- Applies to: persisted notification preferences, shared event filtering, frontend Hook routing, Tauri taskbar IPC, Windows `FlashWindowEx`, and Hook settings status presentation.
+
+### 2. Signatures
+
+```text
+set_taskbar_attention(mode: "finite" | "untilFocused" | null, flashCount?: 1..20)
+
+taskbarAttentionEnabled: boolean = true
+taskbarAttentionMode: "finite" | "untilFocused" = "finite"
+taskbarAttentionFlashCount: integer 1..20 = 5
+```
+
+### 3. Contracts
+
+- Taskbar attention and system Toast have independent master switches and share `systemNotificationEvents`; do not rename that persisted key or reset existing event choices.
+- A qualifying taskbar event does not require a bound terminal Tab. Background-task mode never bypasses the taskbar master switch or shared event filter.
+- `finite` flashes only the taskbar button for the requested count. `untilFocused` continues until the main window is focused. A focused-window event sends the stop mode even after a finite request, so early focus always clears attention.
+- The command validates mode and finite count at the Rust boundary. Non-Windows targets safely validate and perform no platform action.
+- Taskbar failures are diagnostic-only and cannot block application Toast, system Toast, Tab state, replay, or third-party delivery.
+- Hook status inspection remains unconditional for Claude, Codex, Kimi, Pi, and Grok. A disabled bridge still shows its status pill and participates in explicit refresh, but remains excluded from health aggregation, reinstall, environment injection, stats availability, and Claude auto-repair.
+- Disabling a bridge hides module cards, paths, and install/uninstall actions. Refresh never enables a bridge or installs a Hook.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|-----------|-------------------|
+| Finite count 1 or 20 | Accept and request exactly that count. |
+| Finite count missing, 0, or 21 | Reject at the Rust boundary. |
+| Unknown mode | Reject without calling Win32. |
+| Mode `null` | Issue `FLASHW_STOP`. |
+| Window focused | Do not start; actively stop an existing request. |
+| Event has no Tab binding | Taskbar may alert; interactive system Toast keeps its existing Tab requirement. |
+| Bridge disabled | Detect and display status; no install, repair, health, or runtime enablement. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: the app is unfocused, system Toast is disabled, taskbar attention is enabled, and an unbound external Grok Stop event flashes the taskbar without opening or focusing the window.
+- Base: the app is focused; Hook state and application Toast behavior remain unchanged, and any prior taskbar request is stopped.
+- Bad: background-task mode bypasses the taskbar switch/event filter, or a disabled bridge hides its status and prevents explicit inspection.
+
+### 6. Tests Required
+
+- Rust unit tests for finite 1/20, rejected 0/21/missing count, until-focused flags, and stop flags.
+- Run `npx tsc --noEmit`, `cargo check`, `cargo test`, and `git diff --check`.
+- Manual Windows verification for unfocused, minimized, tray-hidden, finite, until-focused, and independent Toast/taskbar switch combinations.
+- Manual Hook settings verification for all four sources in enabled/disabled and missing/not-installed/partial/installed states.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+if (tabId && settings.systemNotificationsEnabled) {
+  startTaskbarAttention();
+}
+```
+
+This incorrectly couples taskbar attention to both Tab binding and system Toast.
+
+#### Correct
+
+```ts
+if (settings.taskbarAttentionEnabled && settings.systemNotificationEvents[payload.event]) {
+  startTaskbarAttention();
+}
+```
+
+The taskbar sink is independent and consumes only its own master switch plus the shared event filter.
+
+## Scenario: Sub-Agent Transcript Hook
+
+### 1. Scope / Trigger
+
+- Trigger: a CLI emits `SubagentStart`, or Claude emits `PreToolUse`/`PostToolUse` for `Agent`/`Task` as fallback lifecycle signals; CLI-Manager opens a read-only transcript pane for that child agent. Only authoritative `SubagentStop` or a terminal rollout record marks it finished; `AgentToolStop` is discovery/update-only.
+- Applies to: hook installation, hidden `__hook` client, local TCP bridge payload, frontend `CliHookPayload`, and transcript subscription.
+
+### 2. Signatures
+
+- Installed hook command: `<cli-manager-exe> __hook --source <claude|codex> --event <event>`.
+- Hook command quoting: Windows-native exe paths are wrapped by a PowerShell command with single-quote escaping; WSL/macOS/Linux exe paths are POSIX shell single-quoted (`'...'\''...'`). Keep the command shape `<exe> __hook --source <source> --event <event>`.
+- Bridge event name: `claude-hook-notification`.
+- Frontend subscribe command: `subagent_transcript_subscribe({ key, transcriptPath, parentTranscriptPath, cwd, sessionId, agentId, wslDistroName }) -> { path, initialContent }`.
+- Codex rollout discovery command: `codex_subagent_transcript_discover({ parentSessionId, agentId, codexConfigDir, wslDistroName, parentTranscriptPath }) -> string | null`.
+- Frontend store action on start/update: `openSubagentTranscript(payload)`.
+- Frontend store action on stop: `finishSubagentTranscript(payload)`.
+- Frontend transcript state: `SubagentTranscriptContent { content: string; ended: boolean; source?: SubagentTranscriptSource; truncatedBytes?: number; resetSeq: number }`.
+- Frontend transcript view prop: `SubagentTranscriptView({ sessionId, title, isVisible })`.
+- Agent tool fallback hook names: `AgentToolStart` (from PreToolUse with matcher Agent), `AgentToolStop` (from PostToolUse with matcher Agent).
+
+### 3. Contracts
+
+- Common payload fields: `tabId`, `source`, `event`, `title`, `message`, `sessionId`, `cwd`, `timestamp`, optional `wslDistroName`, optional `reasoningEffort`.
+- Claude Code effort display is hook-derived, not history-derived: `__hook` reads `effort.level` (plus flat legacy keys such as `reasoning_effort` / `effort_level`) and falls back to `$CLAUDE_EFFORT`. The frontend may use that value as a realtime-only fallback when `HistorySessionUsage.reasoning_effort` is absent.
+- Claude Agent tool fallback events are normalized as `AgentToolStart` from `PreToolUse` and `AgentToolStop` from `PostToolUse`; hook installer must use a matcher limited to `Agent`/`Task`.
+- Claude sub-agent fields: `agentId`, `toolUseId`, `agentType`, `agentTranscriptPath`.
+- Codex sub-agent fields: `agentId`, `agentType`, `transcriptPath`.
+- Kimi `SubagentStart`/`SubagentStop` are explicitly outside this transcript contract: `agent_name` is not a stable identity, so these events continue through generic binding/notification/Replay and never call transcript open/finish actions.
+- Frontend transcript source resolution:
+  - Use `agentTranscriptPath` only when it is present and differs from `transcriptPath`; this is `child-jsonl` mode.
+  - Do not silently render the full parent `transcriptPath` as child output when `agentTranscriptPath` is missing or equals `transcriptPath`; degrade to `parent-jsonl` filtered mode or `lifecycle-only` mode.
+  - Backend child path resolution order is explicit `agentTranscriptPath`, then `<parentTranscriptPath without .jsonl>/subagents/agent-<agentId>.jsonl`, then the legacy `cwd/sessionId/agentId` fallback. The parent filename stem must equal `sessionId`; all explicit and parent-derived paths must pass the existing transcript-root validation.
+  - WSL sub-agent transcript derivation requires `wslDistroName` from the hook environment (`WSL_DISTRO_NAME`); explicit Linux transcript paths are converted to `\\wsl.localhost\<distro>\...` before tailing.
+  - If `wslDistroName` is missing but `cwd` is a WSL UNC path such as `\\wsl.localhost\Ubuntu\data\repo`, frontend and backend may derive the distro from the UNC prefix. The derived distro is only a fallback for child transcript discovery/subscription; it must not make explicit `/home/...` paths look like WSL when no distro or UNC cwd is available.
+  - Claude may emit `ToolStart` / `ToolStop` payloads carrying `agentId` instead of normalized `AgentToolStart` / `AgentToolStop` in some WSL hook paths. Treat `source=claude` plus `ToolStart|ToolStop` plus non-empty `agentId` as a sub-agent transcript lifecycle hint, but do not treat ordinary tool events without `agentId` as sub-agents.
+  - Explicit native POSIX transcript paths such as `/Users/...` or `/home/...` must be tailed as native paths when `wslDistroName` is missing. Do not infer a default WSL distro for explicit `/...` paths.
+  - `AgentToolStart` should create/update a `pending` pane only; it must not subscribe to the parent transcript.
+  - When a Claude start/update event already has `sessionId`, `agentId`, and either `parentTranscriptPath` or `cwd`, the frontend may subscribe to the derived child JSONL immediately. The backend tail waits for the child file to appear, so streaming must not wait for the stop event.
+  - `AgentToolStop` and Claude `ToolStop` with `agentId` may upgrade the matching pending pane to `child-jsonl` when they have an independent `agentTranscriptPath` or enough parent/cwd data to derive `subagents/agent-<agentId>.jsonl`; they must not call `finishSubagentTranscript` or schedule auto-close.
+- Codex `SubagentStart` rollout discovery is eventually consistent: when the first discovery returns no path, the frontend performs a per-child lifecycle retry and subscribes as soon as the matching rollout appears. Retry every second during the initial 15-second window, then reduce to every 5 seconds; stop after subscription, finish, pane close, or unsplit. Do not use a fixed timeout that can leave a long-running child pending until `SubagentStop` backfills the transcript.
+- Codex rollout discovery must preserve the Hook runtime boundary: when `wslDistroName` is present, prefer the parent rollout's `/sessions/` root, otherwise use the configured Codex root, and finally resolve that distro's `$HOME` and scan its `.codex/sessions` through `wsl.exe`; never substitute the Windows process user's `.codex/sessions`. A configured Codex root may be a Linux absolute path, WSL UNC path, or Windows path convertible to `/mnt/<drive>`, but it must not override a valid parent rollout path from the current Hook payload.
+- `SubagentStop` may also carry the first independent child transcript path. When a matching pane already exists, the frontend must call `openSubagentTranscript(payload)` and await subscription/initial backfill before `finishSubagentTranscript(payload)`, regardless of CLI source.
+- Subscribe response fields:
+  - `path`: resolved child JSONL path actually tailed by the backend.
+  - `initialContent`: existing complete JSONL lines already present before tail startup. The frontend must append this immediately; the backend tail starts after the consumed offset to avoid duplicate output.
+- `SubagentStart` and `SubagentStop` must be installed/uninstalled together for each source. Claude `PreToolUse`/`PostToolUse` Agent/Task fallback hooks must be installed/uninstalled with the Claude subagent hooks.
+- Stop routing priority: match by `agentId`; if missing, close only when exactly one transcript pane belongs to the parent `tabId`.
+- Codex child completion must not depend exclusively on `SubagentStop`: a complete child rollout JSONL record with `type=event_msg` and `payload.type=task_complete|turn_aborted` is a fallback stop signal for that transcript key. Malformed/incomplete lines are ignored until a later complete append, and repeated Hook/rollout stop signals are idempotent.
+- When Hook auto-close is enabled, sub-agent transcript panes use `hookPopupAutoCloseSeconds`; when disabled, retain the existing source-specific fallback delay.
+- Transcript rendering performance contract:
+  - Backend transcript tail emits complete JSONL lines only; the frontend may parse appended suffixes incrementally when `resetSeq` is unchanged and `content.length` only grows.
+  - Frontend increments `resetSeq` whenever `reset=true` or content is front-trimmed. A `resetSeq` change is the only signal that consumers must discard parse cache and rebuild from the retained tail.
+  - A hidden transcript pane (`isVisible=false`) must not subscribe to or parse `content`; it may keep rendering its cached snapshot and must catch up once visible again.
+  - The transcript view must cap rendered message rows (currently 300) and display an omitted-count marker rather than rendering an unbounded list.
+  - `MarkdownContent` used for transcript messages must remain memo-safe; do not pass fresh object props that defeat memoization on every append.
+
+### 4. Validation & Error Matrix
+
+- Empty or overlong `tabId` -> bridge rejects with `400 invalid payload`.
+- Unknown `source` -> bridge rejects with `400 invalid payload`.
+- Event not allowed for its source -> bridge rejects with `400 invalid payload`.
+- Missing explicit transcript path and missing derivation fields -> `subagent_transcript_subscribe` returns the specific missing field error.
+- Parent transcript is not a `.jsonl` file or its filename stem differs from `sessionId` -> subscription returns `parent_transcript_not_jsonl` or `parent_transcript_session_mismatch`; do not fall back to a potentially unrelated `cwd`.
+- WSL derivation requested but `wsl.exe` cannot return `$HOME` -> subscription fails and the frontend keeps the degraded transcript source state.
+- WSL Codex discovery receives a config path that is neither Linux absolute, WSL UNC, nor convertible Windows absolute -> return `invalid_wsl_codex_config_dir` and keep the pane pending/degraded.
+- Child transcript already has complete lines at subscribe time -> backend returns them in `initialContent` and starts tailing from that offset; an incomplete final line must wait for completion before emit.
+- Missing or ambiguous stop target -> frontend does nothing; it must not guess and close multiple child panes.
+- Malformed, incomplete, or non-terminal Codex rollout JSONL -> keep the pane active and wait for a later append or Hook stop.
+- `appendSubagentTranscript` receives an unknown key -> ignore it; multi-window broadcasts must not create stray transcript state.
+- Appended transcript content exceeds the retention cap -> retain the latest tail, increment `truncatedBytes`, emit the existing OOM diagnostic, and increment `resetSeq` so view caches rebuild safely.
+
+### 5. Good/Base/Bad Cases
+
+- Good: Codex `SubagentStart` includes `transcript_path`; frontend subscribes directly to that path.
+- Good: Codex `SubagentStart` only has the parent `transcriptPath`, then `SubagentStop` includes `agentTranscriptPath`; frontend upgrades the existing pane, appends subscribe `initialContent`, then marks it ended.
+- Good: Claude `SubagentStart` misses an independent child path, then `SubagentStop` provides `agentTranscriptPath`; frontend upgrades the existing pane before finish instead of ending in degraded state.
+- Good: Claude in WSL emits `ToolStop` with `agentId`, parent `transcriptPath`, UNC `cwd`, and no `wslDistroName`; frontend opens/updates a degraded child pane, derives the distro from `cwd`, and backend subscribes to the derived child path without rendering the parent transcript as child output.
+- Good: Claude emits `SubagentStart` before `agent-<agentId>.jsonl` exists; frontend subscribes to the derived child path immediately and the backend begins emitting complete lines as soon as the file is created.
+- Good: Claude reports a child Worktree as `cwd` while `parentTranscriptPath` points to the real parent session; backend derives the child beside the parent transcript and streams during execution instead of waiting for stop-time backfill.
+- Good: Codex emits `SubagentStart` before the matching rollout exists; lifecycle discovery retries find it during execution and start streaming before `SubagentStop`.
+- Good: a WSL Codex child rollout becomes discoverable more than 15 seconds after `SubagentStart`; lifecycle retry continues at the reduced interval and starts streaming before `SubagentStop`.
+- Good: Codex runs in WSL with `cwd=/mnt/c/repo` and no custom `CODEX_HOME`; discovery prefers the parent rollout's sessions root, otherwise scans `$HOME/.codex/sessions` inside the reported distro and returns the matched rollout as WSL UNC for tailing.
+- Base: Claude `SubagentStart` includes `agent_transcript_path`; frontend uses it unchanged.
+- Good: `SubagentStop` includes `agent_id`; frontend marks the pane ended and closes it after the grace delay.
+- Good: a Codex child rollout appends `task_complete` or `turn_aborted` without a matching `SubagentStop`; only that pane is marked ended and closes after the configured delay.
+- Good: a hidden child transcript pane receives 1MB of JSONL append traffic; the store retains content, but the hidden view does not re-parse or re-render until it becomes visible.
+- Good: a child transcript grows past the rendered row cap; the UI renders the newest rows plus an omitted-count marker instead of thousands of DOM nodes.
+- Good: Claude hook stdin includes `effort.level = "high"`; the bridge emits `reasoningEffort: "high"` and the current terminal's stats card shows the effort even when the JSONL history usage lacks `reasoning_effort`.
+- Bad: `SubagentStop` calls `finishSubagentTranscript` before awaiting the late child transcript subscription; the pane can close with empty output.
+- Bad: treating `AgentToolStop` as child completion; Claude may emit it while the asynchronous child is still running.
+- Bad: A new hook event is installed but not added to the bridge whitelist; the hook silently posts but the bridge rejects it.
+- Bad: `SubagentStop` has no `agent_id` while multiple child panes share one parent; frontend must not close all of them.
+- Bad: searching raw transcript text for `task_complete` and closing a pane when the phrase only appears inside an assistant message.
+- Bad: deriving Claude effort from the model name or global settings when the current hook payload/env has no effort; concurrent sessions can use different `/effort` values.
+- Bad: parsing the full retained transcript and re-rendering every Markdown message on every 250ms tail append; this blocks terminal typing and tab switching.
+
+### 6. Tests Required
+
+- Hook install/uninstall tests assert `SubagentStart`/`SubagentStop` and, for Claude, `PreToolUse`/`PostToolUse` Agent tool fallback commands are written and removed for the affected source.
+- Rust unit test: `read_new_lines` returns only complete JSONL lines and the consumed offset used for subscribe `initialContent`.
+- Rust unit test: explicit `/Users/...` transcript paths stay native without `wslDistroName`; explicit `/home/...` paths convert to WSL UNC only when a distro is provided.
+- Rust unit test: parent transcript resolution wins over a child Worktree `cwd`, preserves explicit child path priority, validates the parent session filename, and converts Linux parent paths to WSL UNC.
+- Rust unit test: WSL UNC `cwd` can provide a fallback distro for derived child transcript paths when `wslDistroName` is missing, and explicit `wslDistroName` still takes precedence.
+- Rust unit test: WSL Codex roots normalize Linux absolute, `\\wsl.localhost`, `\\wsl$`, and Windows drive paths to the correct Linux config root; missing config prefers the parent rollout root and otherwise uses `<WSL $HOME>/.codex`.
+- Rust unit test: WSL Codex roots accept verbatim `\\?\UNC\wsl*` paths and do not append a second `sessions` segment when the configured path already points to the sessions root.
+- Rust unit test: non-Windows hook exe paths with spaces or single quotes are POSIX single-quote escaped.
+- Rust compile check must pass after bridge payload or command signature changes.
+- Rust unit test: `hook_client` extracts `reasoningEffort` from Claude `effort.level`.
+- TypeScript type-check must pass after `CliHookPayload` field changes.
+- Frontend regression test or manual profiling: while a child transcript is hidden and appends continue, React render count/CPU for `SubagentTranscriptView` should not grow with append frequency; when shown again, it catches up from retained content.
+- Frontend regression test: valid Codex `task_complete`/`turn_aborted` records finish only the matching pane; malformed JSON, ordinary messages containing those words, and duplicate stop signals do not trigger extra closes.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+// Falls back to the parent session transcript and can make multiple child panes
+// render the same main conversation as if it were child output.
+transcriptPath: payload.agentTranscriptPath ?? payload.transcriptPath ?? null
+
+// Loses the WSL runtime boundary and repeatedly scans the Windows user's sessions.
+invoke("codex_subagent_transcript_discover", { parentSessionId, agentId, codexConfigDir });
+```
+
+#### Correct
+
+```ts
+const source = resolveSubagentTranscriptSource(payload);
+if (source.kind === "child-jsonl") {
+  const { initialContent } = await subscribe(source.transcriptPath);
+  append(initialContent);
+} else {
+  showDegradedSourceState(source.kind, source.reason);
+}
+
+invoke("codex_subagent_transcript_discover", {
+  parentSessionId,
+  agentId,
+  codexConfigDir,
+  wslDistroName,
+  parentTranscriptPath,
+});
+```
+
+#### Wrong
+
+```ts
+if (content.includes("task_complete")) finishSubagentTranscript(payload);
+```
+
+#### Correct
+
+```ts
+const record = JSON.parse(completeJsonlLine);
+if (record.type === "event_msg" && ["task_complete", "turn_aborted"].includes(record.payload?.type)) {
+  finishMatchingTranscriptOnce(sessionId);
+}
+```
+
+#### Wrong
+
+```ts
+// A long-running WSL child can become discoverable after this fixed deadline.
+if (elapsed > 15_000) stopDiscovery("ttl_expired");
+```
+
+#### Correct
+
+```ts
+// Keep discovery bound to the child pane lifecycle; reduce scan frequency after the fast window.
+const delay = elapsed < 15_000 ? 1_000 : 5_000;
+scheduleNextDiscovery(delay); // stop on subscribed / finished / closed / unsplit
+```
+
+#### Wrong
+
+```tsx
+// Every append reparses the whole retained JSONL and rerenders every Markdown row,
+// including panes hidden by display:none.
+const transcript = useTerminalStore((s) => s.subagentTranscripts[sessionId]);
+const messages = useMemo(() => parseTranscript(transcript.content), [transcript.content]);
+```
+
+#### Correct
+
+```tsx
+// Hidden panes do not subscribe to high-frequency content. Visible panes parse
+// only the appended suffix unless resetSeq changed.
+const transcript = useTerminalStore((s) => (isVisible ? s.subagentTranscripts[sessionId] : undefined));
+const messages = useIncrementalTranscriptCache(transcript?.content, transcript?.resetSeq);
+```
+
+## Scenario: Question Request Notifications
+
+### 1. Scope / Trigger
+
+- Trigger: Codex calls `request_user_input`, or Claude Code calls `AskUserQuestion` and waits for the user to choose or answer.
+- Applies to: local/WSL/cc-switch/SSH Hook installation, bridge validation, Codex trust state, attention routing, and localized app/system notifications.
+
+### 2. Signatures
+
+```text
+Codex: PreToolUse matcher=request_user_input -> event=Notification
+Claude: PreToolUse matcher=AskUserQuestion -> event=Notification
+```
+
+### 3. Contracts
+
+- Both tools use an exact `PreToolUse` matcher. `PostToolUse`, `PermissionRequest`, and Claude `Notification/elicitation_dialog` are not question-request substitutes.
+- The bridge event remains `Notification`; `toolName` must survive normalization and transport so the frontend can distinguish a question request from an ordinary notification.
+- The Claude Attention module requires both `Notification(permission_prompt|idle_prompt)` and `PreToolUse(AskUserQuestion)`. The Codex Attention module requires both `PermissionRequest` and `PreToolUse(request_user_input)`.
+- Full install, module install, uninstall, status inspection, cc-switch common config, WSL commands, and SSH Agent templates must agree on these entries. Uninstall removes only the CLI-Manager-owned question command and preserves Claude `ToolStart` and sub-agent entries that share `PreToolUse`.
+- Codex maps the native event to trust-state name `pre_tool_use`; the exact matcher participates in `trusted_hash`. Trust-only repair is allowed only after every required event exists.
+- Codex trust-state table keys must be compared by parsed TOML value, not by source quoting. Literal keys such as `[hooks.state.'C:\Users\...']` and escaped basic keys such as `[hooks.state."C:\\Users\\..."]` are equivalent; merge must replace the existing CLI-Manager block instead of creating a duplicate table. Status inspection may collapse equivalent duplicate blocks for current CLI-Manager Hook keys before parsing the full config, while preserving unrelated state.
+- Missing or wrong matchers make an old installation partial/outdated. Status inspection must not silently install the missing event.
+- `Notification + source/toolName` selects the localized “selection or answer required” toast and system-notification copy before using the generic bridge title. Existing attention state, focus suppression, background override, target activation, and third-party notification settings remain authoritative.
+- When no frontend client is connected, an exact question request shares the existing `PermissionRequest` daemon activation path so a background task can ask for user input. Ordinary `Notification` events must not launch the app.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|-----------|-------------------|
+| Exact Codex/Claude question matcher | Emit one `Notification` with the matching `toolName`. |
+| Ordinary tool or wrong matcher | No question-request notification. |
+| Old install lacks the question entry | Report partial/outdated; reinstall upgrades it. |
+| Codex question trust is missing/stale | Repair only when the event set and feature flag are complete. |
+| Equivalent literal/basic keys duplicate a current CLI-Manager trust table | Keep the last block, remove only earlier equivalent CLI-Manager blocks, then parse and re-check the full config. |
+| Duplicate or invalid unrelated trust table | Preserve the file and return the parse error; do not rewrite user-owned state. |
+| Attention module uninstall | Remove approval/attention plus the owned question entry; preserve unrelated hooks. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a background Codex terminal requests one choice; the system notification says it is waiting for a selection or answer and opens the owning terminal when clicked.
+- Good: Codex previously wrote a literal Windows-path trust key and CLI-Manager wrote the equivalent escaped basic key; status inspection collapses the owned duplicate and keeps unrelated project/user state.
+- Base: Claude `permission_prompt` and Codex `PermissionRequest` keep their existing approval behavior.
+- Bad: registering a catch-all `PreToolUse` command causes every tool call to look like a question, removing all Claude `PreToolUse` entries during Attention uninstall, or comparing raw TOML header text and appending an equivalent duplicate key.
+
+### 6. Tests Required
+
+- Local Rust tests cover exact matcher install/status/uninstall, Claude common-config completeness, Codex `pre_tool_use` trust hash, and Codex `Notification` admission with unknown-event rejection.
+- Local Rust tests cover literal/basic TOML trust-key normalization, merge replacement, and status recovery from an already duplicated CLI-Manager state table.
+- SSH Agent tests cover managed entry counts, exact matcher merge/removal, and Codex runtime `Notification` admission.
+- Hook-schema tests preserve the question `toolName`; TypeScript type-check covers localized frontend recognition.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```text
+PreToolUse matcher="" -> Notification
+```
+
+#### Correct
+
+```text
+Codex PreToolUse matcher=request_user_input -> Notification
+Claude PreToolUse matcher=AskUserQuestion -> Notification
+```
+
+## Scenario: System-Level Hook Notifications
+
+### 1. Scope / Trigger
+
+- Trigger: a `claude-hook-notification` payload should also surface as an OS-level notification while preserving the existing in-app toast and tab status behavior.
+- Applies to: frontend hook event listener, persisted hook notification settings, Windows-local WAV validation/playback, Tauri notification permission, and WSL-to-Windows notification bridge commands.
+
+### 2. Signatures
+
+- Frontend event: `listen<CliHookPayload>("claude-hook-notification", handler)`.
+- Frontend setting fields: `systemNotificationsEnabled: boolean`, `systemNotificationSoundPath: string | null`, `suppressSystemNotificationsWhenFocused: boolean`, and `systemNotificationEvents: Record<HookEventType, boolean>`.
+- Hook event union for system notifications: `SessionStart | UserPromptSubmit | Notification | Stop | StopFailure | PermissionRequest`.
+- Backend command: `is_wsl() -> bool`.
+- Backend command: `send_notification_via_windows(title: String, body: String) -> Result<(), String>`.
+- Backend command: `send_interactive_system_notification(title: String, body: String, tabId: String, actionLabel: String, customSoundPath?: String | null) -> Result<(), String>`.
+- Windows-local settings commands: `validate_system_notification_sound(path: String) -> Result<(), String>` and `play_system_notification_sound(path: String) -> Result<(), String>`.
+- Backend-to-frontend activation event: `system-notification-action` with `{ tabId }`.
+- Non-WSL frontend notifier: `send_interactive_system_notification({ title, body, tabId, actionLabel, customSoundPath })`.
+
+### 3. Contracts
+
+- System notifications are **additive**: they must not replace app toast cards or tab status indicators.
+- Default event settings: `Stop`, `StopFailure`, `PermissionRequest`, and `Notification` enabled; `SessionStart` and `UserPromptSubmit` disabled.
+- `suppressSystemNotificationsWhenFocused` defaults to `true`: when the main Tauri window is focused/being used, frontend skips OS-level notifications while preserving in-app Hook toast and tab status updates.
+- If `suppressSystemNotificationsWhenFocused` is `false`, focused-window state must not suppress OS-level notifications; existing global/per-event notification settings remain authoritative.
+- Project name priority: `tabTitle` -> basename of `payload.cwd` -> `"未知项目"`.
+- Title format: `CLI-Manager`; the OS notification should be attributed to the app rather than the CLI process.
+- Body format: emoji + `Claude Code`/`Codex CLI` + project/event phrase, optionally appending `payload.message`.
+- WSL fallback path: frontend first tries the interactive native notification command; only if that send path throws and `is_wsl` is true may it call `send_notification_via_windows`.
+- Backend guard: `send_notification_via_windows` must reject non-WSL calls so Windows native app instances cannot accidentally show a `Windows PowerShell` source/icon.
+- Non-WSL path: frontend checks/requests notification permission before `send_interactive_system_notification`; Windows native app instances must not route through PowerShell because that makes the toast appear as `Windows PowerShell`.
+- Click behavior: native interactive notifications emit `system-notification-action`; the frontend shows/focuses the app and activates the owning terminal `tabId`. If the tab no longer exists, the app is focused and the user sees a target-closed toast.
+- `systemNotificationSoundPath` defaults to `null`, is persisted locally, and is excluded from WebDAV/local snapshot sync because it is a machine-specific absolute path.
+- On Windows, a valid persisted `.wav` path is canonicalized and checked as a regular RIFF/WAVE file before playback; the action-capable Toast's audio is silenced and the validated file is played asynchronously with WinMM. A missing, stale, malformed, oversized, or otherwise unplayable path logs a warning and preserves the existing default notification behavior.
+- The settings UI validates a selected file before persistence, revalidates stale paths on load, and offers localized choose, preview, and clear actions. The custom sound card is hidden on non-Windows platforms.
+- WSL fallback never receives or interprets `systemNotificationSoundPath`; WSL and non-Windows notification behavior remains unchanged.
+
+### 4. Validation & Error Matrix
+
+- `systemNotificationsEnabled === false` -> no system notification, no error.
+- `suppressSystemNotificationsWhenFocused === true` and main window is focused -> no system notification, no error; app toast/tab status still update.
+- Main-window focus detection fails -> continue notification flow and log warning; do not silently drop critical notifications.
+- `systemNotificationEvents[payload.event] !== true` -> no system notification, no error.
+- Event outside `HookEventType` (e.g. transcript-only hook events) -> no system notification, no error.
+- Non-WSL notification permission denied -> no system notification; log warning only.
+- `is_wsl` command failure or notification API failure -> catch and log warning; app toast/tab state must continue.
+- WSL bridge title/body too long or containing NUL -> command returns `Err(String)`; frontend catches and logs warning.
+- `powershell.exe` unavailable in WSL -> command returns `Err(String)`; frontend catches and logs warning.
+- Windows custom sound path is missing, non-WAV, malformed, too large, or no longer readable -> settings validation reports a stable error; notification send logs a warning, keeps the default Toast audio, and does not block Hook UI/state/action delivery.
+- Windows custom sound path is valid -> the OS notification is sent once with custom playback; no second default Toast sound is requested.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `Stop` for a tab titled `CLI-Manager` sends title `CLI-Manager` with body like `✅ Claude Code 在 CLI-Manager 的任务已完成` and still updates the tab status.
+- Good: WSL fallback `PermissionRequest` sends through `send_notification_via_windows` without asking Tauri notification permission, and the Toast XML includes `来自 CLI-Manager` attribution.
+- Good: native Windows/macOS/Linux `PermissionRequest` emits `system-notification-action` after notification click and activates the matching terminal tab.
+- Good: Windows `Stop` with a valid selected `.wav` plays the custom file while the interactive notification still activates its owning terminal when clicked.
+- Base: `SessionStart` updates session binding but sends no system notification under default settings.
+- Base: no selected sound uses the existing notification backend default; WSL fallback does not attempt to play a Windows-local path.
+- Base: main window focused and foreground suppression enabled -> no OS notification, but the Hook toast still appears inside CLI-Manager.
+- Base: main window focused and foreground suppression disabled -> OS notification is allowed if global and per-event settings allow it.
+- Bad: system notification failure prevents `showClaudeHookToast` or `handleCliHookEvent` from running; notification errors must stay isolated.
+- Bad: focused-window suppression is hard-coded without a persisted setting; users cannot opt back into OS notifications while using CLI-Manager.
+- Bad: Windows native app instances route through PowerShell and show source `Windows PowerShell`; they must use the Tauri notification plugin path.
+- Bad: notification click activation bypasses the shared frontend target activation helper and diverges from app toast behavior.
+
+### 6. Tests Required
+
+- TypeScript type-check must pass after changes to `HookEventType`, settings migration, or notification event filtering.
+- TypeScript type-check must pass after adding or migrating Hook notification settings.
+- Rust compile check must pass after changes to `is_wsl`, `send_notification_via_windows`, or interactive notification command signatures.
+- Manual activation test point: clicking a native notification focuses the app and activates the matching tab; if the tab is closed, it focuses the app and shows the target-closed toast.
+- Manual Windows/macOS/Linux smoke test: enabled event produces an OS notification with expected title/body.
+- Manual WSL smoke test: enabled event produces a Windows Toast through `powershell.exe`.
+- Settings UI test point: toggling one event preserves the other `systemNotificationEvents` values.
+- Settings UI test point: toggling focused-window suppression changes only OS-level notification behavior, not app toast or tab status behavior.
+- Regression test point: app toast and tab indicators still work when system notifications are disabled or fail.
+- Windows file test point: choose valid/uppercase-extension, malformed, missing, directory, oversized, NUL-containing, and non-WAV paths; verify preview/clear and restart persistence without syncing the absolute path.
+- Windows delivery test point: valid custom playback does not duplicate the default sound, stale-path delivery falls back safely, and native notification click activation remains intact.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+await sendSystemNotification(payload, tabTitle);
+showClaudeHookToast(payload, tabId);
+```
+
+#### Correct
+
+```ts
+showClaudeHookToast(payload, tabId);
+void sendSystemNotification(payload, tabTitle);
+```
+
+## Scenario: Third-party Hook Notifications
+
+### 1. Scope / Trigger
+
+- Trigger: the local bridge or daemon accepts a validated Claude/Codex Hook payload for `SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `StopFailure`, or `PermissionRequest`.
+- Applies to: `src-tauri/src/features/hooks/claude.rs`, `src-tauri/src/infrastructure/daemon/server.rs`, `src-tauri/src/third_party_notification/*`, `thirdPartyHookTargets` in settings, and the Hook settings UI.
+
+### 2. Contracts
+
+- Dispatch ownership belongs to the process that actually receives the Hook HTTP request: app bridge in in-process mode, daemon hook sink in daemon mode.
+- Frontend `listen("claude-hook-notification")` handlers must not send third-party notifications; daemon cache replay is for UI state only and must not cause a second remote send.
+- Dispatch is best-effort and non-blocking: the sink may only try to enqueue into the bounded queue and must continue original emit/status/broadcast work even when the queue is full.
+- `thirdPartyHookNotificationsEnabled === false` disables production fan-out while keeping saved targets untouched; manual test send remains available for validating a draft target.
+- Remote message content is limited to a safe summary: CLI source, cwd basename project name, event label, 24-hour local time from the user's system timezone, generated notification UUID, and a short action summary derived only from the event enum. It must not include `payload.message`, Prompt, terminal output, absolute cwd, tab/session id, transcript paths/content, tool args, or environment variables.
+- Default remote copy may include fixed event emoji derived from the event enum only.
+- Supported providers: DingTalk, Feishu, WeCom, Bark, PushPlus, WxPusher, ServerChan, Telegram, ntfy, Gotify, and Custom HTTP.
+- Built-in providers must parse provider business responses, not treat HTTP 2xx alone as success. Custom HTTP accepts any 2xx.
+- Custom HTTP supports only GET/POST, fixed variable replacement, query, headers, JSON/form/text body, and no scripts/conditions/functions.
+- Secrets remain in the existing settings store; UI masking is not encryption. Logs must not include full URL/query/header/body/token/secret/device key or raw remote response.
+
+### 3. Tests Required
+
+- Rust unit tests for message minimization, unsupported event filtering, Custom HTTP JSON leaf replacement, and controlled header rejection.
+- Rust compile check must pass after bridge/daemon/command changes.
+- TypeScript type-check must pass after settings migration or Hook settings UI changes.
+- Regression: one Hook payload produces at most one third-party dispatch in app mode and one in daemon mode; frontend reconnect/cache replay produces zero additional remote dispatches.
+
+## Scenario: CLI Hook Protection Through cc-switch Common Config
+
+### 1. Scope / Trigger
+
+- Trigger: Claude/Codex Hook install/status/uninstall must survive external cc-switch provider switches that rewrite CLI settings.
+- Applies to: `src-tauri/src/features/hooks/settings/mod.rs`, frontend Hook settings/status callers, persisted `ccSwitchDbPath`, and cc-switch SQLite `settings.common_config_claude` / `settings.common_config_codex`.
+- This scenario is global/user-level only. Do not implement project-local `.claude/settings.local.json` or Claude managed settings from this path.
+
+### 2. Signatures
+
+```rust
+pub async fn hook_settings_get_status(
+    app: AppHandle,
+    selected_dir: Option<String>,
+    codex_selected_dir: Option<String>,
+    cc_switch_db_path: Option<String>,
+    auto_repair: Option<bool>,
+) -> Result<HookSettingsStatus, String>
+
+pub async fn hook_settings_install(
+    app: AppHandle,
+    selected_dir: Option<String>,
+    codex_selected_dir: Option<String>,
+    cc_switch_db_path: Option<String>,
+) -> Result<HookSettingsStatus, String>
+
+pub async fn hook_settings_uninstall(
+    app: AppHandle,
+    selected_dir: Option<String>,
+    codex_selected_dir: Option<String>,
+    cc_switch_db_path: Option<String>,
+) -> Result<HookSettingsStatus, String>
+
+pub async fn hook_settings_install_codex(
+    app: AppHandle,
+    selected_dir: Option<String>,
+    codex_selected_dir: Option<String>,
+    cc_switch_db_path: Option<String>,
+) -> Result<HookSettingsStatus, String>
+
+pub async fn hook_settings_uninstall_codex(
+    app: AppHandle,
+    selected_dir: Option<String>,
+    codex_selected_dir: Option<String>,
+    cc_switch_db_path: Option<String>,
+) -> Result<HookSettingsStatus, String>
+```
+
+```ts
+interface HookSettingsStatus {
+  claude: ToolHookSettingsStatus;
+  codex: ToolHookSettingsStatus;
+  ccSwitch: {
+    state: "notDetected" | "notSynced" | "synced" | "invalidDb" | "unavailable" | "syncFailed";
+    dbPath: string | null;
+    message: string | null;
+    wslMismatch: boolean;
+  };
+  claudeAutoRepaired: boolean;
+}
+```
+
+### 3. Contracts
+
+- Frontend must pass `ccSwitchDbPath: settings.ccSwitchDbPath ?? undefined`; `null`/missing means platform default `~/.cc-switch/cc-switch.db`.
+- Backend must reuse the cc-switch DB resolver: explicit custom paths are validated and never silently replaced by defaults.
+- Installing Claude Hook writes normal Claude `settings.json` hooks first, then best-effort merges the same CLI-Manager-owned hook commands into `settings.common_config_claude`.
+- Installing Codex Hook writes normal Codex `hooks.json` commands and `config.toml` feature flags first, then best-effort merges the TOML `[features].hooks = true` flag plus any current CLI-Manager-owned Codex `[hooks.state.*]` trust blocks into `settings.common_config_codex`. Codex hook commands remain in `hooks.json`; `common_config_codex` is not JSON.
+- Hook settings UI shows the cc-switch protection card once, above system notification settings. Do not duplicate it in both Claude and Codex sections.
+- Claude common-config merge may remove/replace only CLI-Manager-owned hook commands (`__hook` marker or known legacy scripts); it must preserve non-hook fields and non-CLI-Manager hook entries. Codex common-config merge may only add or replace the TOML `features.hooks` flag and marker-owned `[hooks.state.*]` trust blocks for the current user-level Codex `hooks.json`; it must preserve other TOML fields and unrelated hook state.
+- Full uninstall strips all CLI-Manager-owned common-config entries. Module uninstall must instead rebuild the owned portion from the post-operation local `settings.json` / `hooks.json` and preserve still-installed CLI-Manager modules; a partial local status must never be treated as permission to delete every owned common-config entry.
+- `settings.value` is nullable in cc-switch DBs. A `NULL` value for `common_config_<tool>` is treated as missing config, not as `db_query_failed`.
+- When `common_config_codex` has no `[features]` table, insert the `[features]` block before the first existing TOML table header; append only when the snippet has top-level keys and no tables. This avoids leaking later text-concatenated provider keys into `[features]` while preserving tables such as `[projects.'\\?\F:\...']`, `[windows]`, and `[tui]`.
+- Common-config writes use `sqlx` and an explicit transaction. Do not add `rusqlite`.
+- If cc-switch is missing or common-config sync fails, Hook installation still succeeds and the returned `ccSwitch.state` explains the protection status.
+- Hook config paths and the cc-switch DB runtime are independent. A WSL Claude/Codex config
+  may use a host Windows DB, and a Windows or WSL config may use a DB inside WSL.
+- Hook commands still follow the target config runtime (`/mnt/<drive>/...` for WSL targets,
+  native paths otherwise). Database access follows only the DB path: native DBs use sqlx;
+  WSL DB reads/writes are routed through the named distro and must never use UNC direct writes.
+- `autoRepair: true` means "the user previously installed Claude Hook"; if CLI-Manager-owned hooks are missing or partial, backend may reinstall them and return `claudeAutoRepaired: true`.
+- Local Codex status inspection may automatically rebuild only the current user-level CLI-Manager `[hooks.state.*]` trust blocks when every required Hook event and `[features].hooks` are already present. It must not install missing events or modify unrelated trust blocks.
+
+### 4. Validation & Error Matrix
+
+| Condition | `ccSwitch.state` / behavior |
+|-----------|-----------------------------|
+| Default DB path missing | `notDetected`; Hook install/status succeeds |
+| Explicit DB path missing or not `.db` | `invalidDb`; do not fallback to default |
+| WSL CLI config dir + host DB path | sync normally; Hook command uses WSL path |
+| Windows/WSL CLI config dir + WSL DB path | sync in the DB's WSL distro |
+| WSL runtime unavailable | `syncFailed` with stable `wsl_sqlite_*` message; never UNC-write |
+| Missing `settings` table | `unavailable`; Hook install succeeds |
+| Invalid `common_config_claude` JSON | `syncFailed`, message `common_config_parse_failed`; do not overwrite |
+| Existing `common_config_codex` TOML | preserve existing TOML fields and set `[features].hooks = true`; do not parse as JSON |
+| Existing `common_config_codex` row with `NULL` value | treat as missing config; write minimal `[features]\nhooks = true` TOML |
+| Current Codex `config.toml` has trusted CLI-Manager `hooks.state` entries | copy those state blocks into `common_config_codex` with CLI-Manager marker comments |
+| Current Codex `config.toml` has unrelated or project-local `.codex/hooks.json` state | do not copy into `common_config_codex` |
+| Complete Codex Hook with missing, disabled, or stale CLI-Manager trust state | rebuild the owned trust blocks and return `installed` after re-checking |
+| Codex Hook missing any required event or feature flag | keep `partialInstalled`; do not fabricate trust state |
+| SQLite open/query/write failure | `syncFailed` with stable `db_*`/`db_write_failed` message |
+| Existing non-CLI-Manager hooks | preserved on install, reinstall, and uninstall |
+
+### 5. Good/Base/Bad Cases
+
+- Good: User selected a moved cc-switch DB in Settings -> Provider; Hook install syncs the relevant `common_config_<tool>` key at that exact path and returns `synced`.
+- Good: `common_config_codex` contains top-level Codex keys plus `[projects.'\\?\F:\idea-work\business-center']`, `[windows]`, and `[tui]`; Hook install preserves all existing lines and inserts `[features].hooks = true` before the first table.
+- Good: Codex has already trusted CLI-Manager entries in user-level `~/.codex/config.toml`; Hook install copies only those current `~/.codex/hooks.json:<event>:<entry>:<hook>` state blocks into `common_config_codex`.
+- Good: every required Codex Hook exists but one owned trust hash is stale; status inspection replaces only CLI-Manager state blocks and preserves user-owned state.
+- Base: cc-switch is not installed; Hook install still writes normal CLI settings and returns `notDetected`.
+- Base: Codex hooks are installed but no trust hash exists yet; common-config sync still writes `[features].hooks = true` and does not fabricate `trusted_hash` values.
+- Base: user previously installed Hook, cc-switch rewrites `settings.json`, and startup calls status with `autoRepair: true`; backend restores missing hooks and frontend shows one lightweight notice.
+- Bad: invalid explicit DB path falls back to `%USERPROFILE%/.cc-switch/cc-switch.db`; this can write the wrong database and is forbidden.
+- Bad: merging common config replaces provider env, MCP, permissions, or third-party hooks; only CLI-Manager hook entries are owned here.
+- Bad: appending a new `[features]` table after the last existing TOML table in a common-config snippet; downstream text concatenation can put provider keys in the wrong TOML table scope.
+- Bad: copying every `[hooks.state.*]` entry from Codex config; this can leak project-local or user-owned hook trust into cc-switch global common config.
+- Bad: treating a missing required event as a trust-only failure and reporting `installed` after creating hashes.
+
+### 6. Tests Required
+
+- Rust unit tests for Claude common-config merge preserving existing fields and non-CLI-Manager hooks, and Codex TOML common-config preserving existing fields while enabling `[features].hooks`.
+- Rust regression tests for Codex common-config with the real cc-switch `settings(key TEXT PRIMARY KEY, value TEXT)` shape, including nullable `value` and Windows project table keys.
+- Rust regression tests for copying only current user-level CLI-Manager Codex `hooks.state` blocks into `common_config_codex`, replacing stale marker-owned hashes, and excluding project-local `.codex/hooks.json` state.
+- Rust regression tests for trust repair covering missing, disabled, and stale hashes; assert unrelated state is preserved and missing required events remain `partialInstalled` without repair.
+- Rust unit tests for strip/uninstall preserving non-CLI-Manager hooks.
+- Rust SQLite regression tests must cover full uninstall and module uninstall separately: the former removes all owned entries, while the latter keeps the remaining local CLI-Manager Hook entries and preserves user-owned content.
+- Rust regression test that Claude common-config status requires every installed event, including Claude `Notification`; Codex common-config status requires `[features].hooks = true`.
+- Rust unit test that invalid Claude common-config JSON returns `common_config_parse_failed`.
+- TypeScript type-check after adding payload fields or new frontend status states.
+- Manual smoke points: no cc-switch DB, default DB present, custom selected DB, invalid selected DB,
+  WSL CLI config + Windows DB, and Windows/WSL CLI config + WSL DB.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+// Do not hard-code a local Windows user path or silently fallback from an invalid explicit DB.
+let db = PathBuf::from(r"C:\Users\Admini\.cc-switch\cc-switch.db");
+```
+
+#### Correct
+
+```rust
+let path = resolve_ccswitch_db_path_for_hook(&app, cc_switch_db_path, &claude_dir)?;
+```
+
+## Scenario: SSH Agent Hook Lifecycle And Delivery
+
+### 1. Scope / Trigger
+
+- Trigger: an SSH Host explicitly installs Claude/Codex Hook entries through `cli-manager-ssh-agent`, or a bound remote CLI emits one of those events.
+- Applies to: `hook-schema`, Agent `hook_config`/`hook_runtime`/bridge protocol, SSH launch binding, daemon event validation, `ClaudeHookPayload`, and SSH CLI Integration UI/storage.
+
+### 2. Signatures
+
+```text
+ssh_agent_hook_inspect(configuredConfigRoot, source, Agent identity) -> HookConfigReport
+ssh_agent_hook_preview(..., action=install|uninstall, expectedCanonicalRoot?) -> HookConfigReport
+ssh_agent_hook_apply(..., expectedCanonicalRoot?, expectedFiles[]) -> HookConfigReport
+
+cli-manager-ssh-agent hook --source <source> --event <event>
+  --managed-by cli-manager-ssh-agent --installation-id <uuid>
+```
+
+Reserved launch environment: `CLI_MANAGER_SSH_HOST_ID`, `CLI_MANAGER_SSH_CLIENT_INSTANCE_ID`, `CLI_MANAGER_PROJECT_ID`, `CLI_MANAGER_TAB_ID`, and `CLI_MANAGER_BRIDGE_EPOCH`.
+
+### 3. Contracts
+
+- Remote Hook installation is explicit per Host/tool/config root. Page open, Host save, Agent probe, Agent install, and config-root browsing do not write Hook configuration.
+- Agent reports and desktop persistence use the canonical config root plus actual config file paths/fingerprints. Agent binary/install paths are never treated as Hook or history roots.
+- Re-inspection preserves the prior validated installation record for the same canonical root, while explicit uninstall clears it. Multiple Host/project references to one canonical root mirror one physical Hook status.
+- Ownership requires the exact stable Agent command, source/event, `--managed-by cli-manager-ssh-agent`, and current installation UUID. Substring matching is forbidden.
+- Missing standard defaults may be created only by confirmed Hook install. Missing custom roots are rejected. Root or config-file symlinks remain links; a target change after preview aborts the transaction.
+- A custom root deleted after installation remains missing for install/inspect. Uninstall alone may recover one exact Agent-owned canonical record to clear stale ownership without recreating the directory. Any UI uninstall based on a stored Hook report supplies the prior canonical identity, so a configured-root symlink retargeted from A to B can clean only A through an exact unique Agent record; a direct request without an expected identity follows B. Missing, ambiguous, or invalid records fail closed.
+- Config merging preserves unrelated entries and unknown events. Duplicate exact entries are normalized in place. User-owned Codex `features.hooks = true` remains enabled after uninstall.
+- Remote runtime requires all reserved binding variables. Ordinary SSH/IDE/tmux launches and other desktop clients are no-op and produce no spool record.
+- A remote SSH PTY receives the Agent bridge identity only when its effective Host/source/configured root is recorded as `installed` and still matches the current Agent installation/machine identity. Installing Agent without Hook does not add a background SSH connection.
+- Hook stdin is bounded; shared normalization feeds local and remote paths. Remote spool removes prompt/message before persistence.
+- Daemon validates Host/client/project/Tab/epoch/installation/source against a live PTY before routing. Remote transcript refs stay in `remoteTranscriptRef` fields and never enter local transcript/file commands.
+- Delivery is at least once from Agent to daemon, then deduplicated by event id. Spool uses monotonic sequence, ACK deletion, TTL/count/byte limits, and sequenced gap warnings.
+- The reusable bridge is protocol `1.1`: bounded preamble/response deadlines, 10-second heartbeat, global four-bridge/two-reconnect gates, bounded cancellation/backpressure, takeover retry, and streaming spool read/ACK apply before Hook delivery.
+- The shared Claude/Codex `ClaudeHookPayload::to_notification_job` path must clear SSH cwd for both sources. Its display-only project label comes only from the configured sidebar `Project.name` captured in the desktop launch plan and injected by the daemon after live SSH binding validation; neither the remote event nor the remote cwd basename may author that label. Third-party notifications never receive remote cwd, transcript refs, Host/project/session/Tab identity, or prompt text.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+|---|---|
+| Missing/invalid reserved binding | successful Hook no-op |
+| Source/event/installation/owner invalid | Hook runtime error is swallowed by CLI; no spool write |
+| Config changed after preview | `hook_config_changed` |
+| Root/config symlink target changed | `hook_config_root_changed` |
+| Foreign CLI-Manager marker/placement | `hook_config_owner_conflict` |
+| Stale spool lock | remove only after dead PID/age check and retry |
+| Spool limit/TTL removes events | insert `gap` with dropped count and sequence |
+| Event does not match a live daemon binding | reject without frontend/third-party delivery |
+
+### 5. Good/Base/Bad Cases
+
+- Good: one Host has Claude default root and a Codex project override; both Hooks install independently and share the Host bridge without cross-routing events.
+- Base: Agent is installed but Hook is not; remote terminal behavior is unchanged and live Hook status is unavailable.
+- Base: bridge is offline; Hook appends to its Host/client/installation spool and exits promptly, then reconnect replays and ACKs it.
+- Bad: rewrite all `hooks` arrays, infer ownership from an Agent-name substring, broadcast to every client, interpret a remote transcript ref as a local path, or include remote cwd in third-party notification data.
+
+### 6. Tests Required
+
+- Agent tests: exact merge/uninstall, duplicates, unknown events, malformed JSON/TOML, Codex feature/comment ownership, default/custom roots, symlink target changes, fingerprints, journal rollback, binding no-op, stdin bound, message redaction, stale lock, meta rebuild, spool limits/gap, and ACK.
+- Desktop Rust tests: strict report validation, reserved env overwrite, session binding rejection, bridge full-spool dedup including gap replay, remote payload validation, and Claude/Codex third-party cwd redaction plus trusted sidebar project-label propagation.
+- Frontend/type tests: per-tool Host roots, grouped project overrides, retained-root cleanup, preview confirmation, canonical paths, bilingual states, and remote transcript local-API refusal.
+- Run Agent host tests, Linux x64/arm64 all-target checks, desktop Rust tests, TypeScript, and `git diff --check`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+if command.contains("cli-manager-ssh-agent") {
+    remove_hook(command);
+}
+```
+
+#### Correct
+
+```rust
+if command == expected_command(source, event, installation_id) && matcher == expected_matcher {
+    remove_hook(command);
+}
+```
+
+Exact ownership prevents upgrades or uninstalls from deleting third-party and other-installation entries.
+
+## Scenario: Pi Agent Extension Hook Bridge
+
+### 1. Scope / Trigger
+
+- Trigger: Pi Agent uses auto-discovered TypeScript Extensions instead of Claude/Codex shell hook configuration.
+- Applies to: Hook settings commands, generated extension ownership, install status, PTY callback environment enablement, local Hook payload validation, and realtime stats session binding.
+
+### 2. Signatures
+
+```text
+hook_settings_install_pi({ selectedDir, codexSelectedDir, piSelectedDir, ccSwitchDbPath, module? })
+hook_settings_uninstall_pi({ selectedDir, codexSelectedDir, piSelectedDir, ccSwitchDbPath, module? })
+
+Pi extension path: ~/.pi/agent/extensions/cli-manager-hook.ts
+Pi source: pi
+Pi events: SessionStart | UserPromptSubmit | Stop
+Stable conflict error: pi_extension_conflict
+Generated lifecycle reporter: postHookEvent(event, sessionId) -> Promise<void>
+Generated reporter deadline: HOOK_TIMEOUT_MS = 1_000
+```
+
+### 3. Contracts
+
+- The generated extension is owned only when its content contains `PI_EXTENSION_MARKER`.
+- Install and per-module install may create a missing file or rewrite a marker-owned file; they must not rewrite an existing unowned file.
+- Uninstall may remove only a marker-owned file.
+- Required Pi modules are session start, running, stop, and the built-in Extension loading mechanism. Pi has no attention, failure, or sub-agent module requirement.
+- Full Pi installation reports `installed`; any non-empty strict subset reports `partialInstalled`; no modules reports `notInstalled`.
+- `session_start` maps to one `SessionStart`, `agent_start` maps to one `UserPromptSubmit`, and `agent_settled` maps to one `Stop`. Do not also map `before_agent_start` to `UserPromptSubmit`, because one Pi run emits both lifecycle events.
+- The extension reads `CLI_MANAGER_TAB_ID`, `CLI_MANAGER_NOTIFY_PORT`, and `CLI_MANAGER_NOTIFY_TOKEN` from its PTY environment and silently skips reporting if any are missing.
+- Pi lifecycle handlers must detach bridge delivery with `void postHookEvent(...)`; they must never `await` a loopback HTTP request, because Pi awaits extension handlers before continuing the agent lifecycle.
+- `postHookEvent` is best-effort and owns a bounded `AbortController` timeout of `HOOK_TIMEOUT_MS`. Timeout, connection failure, or abort is swallowed after cleanup and cannot delay terminal input, agent start, or settle.
+- New user-visible Pi errors must pass through the frontend language selector in every install consumer, including Hook settings and sidebar repair; `zh-TW` uses the existing OpenCC conversion path.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Extension file is missing | Create the managed extension. |
+| Extension file contains the ownership marker | Reinstall or update selected modules. |
+| Extension file exists without the ownership marker | Return `pi_extension_conflict`; preserve exact content. |
+| Selected Pi directory is missing during install | Create it. |
+| Selected Pi directory is missing during status/uninstall | Return the existing directory-missing behavior; do not invent installed state. |
+| Hook callback environment is incomplete | Extension returns without throwing or interrupting Pi. |
+| Loopback bridge is slow, unreachable, or times out | Return from the Pi event handler immediately; abort the detached request within `HOOK_TIMEOUT_MS` and swallow its failure. |
+| Full three-module install | Return `installed`, allowing PTY callback environment injection. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a Pi-only user installs all modules, the shared Hook environment is injected, `SessionStart` binds the Pi session id, and realtime stats load.
+- Good: the local bridge is unavailable while a Pi prompt is submitted; Pi starts the run immediately and the detached report expires within one second.
+- Good: a user already has an unrelated `cli-manager-hook.ts`; install fails with a localized conflict message and preserves the file byte-for-byte.
+- Base: only session-start is enabled; status is `partialInstalled` and the module UI reflects that subset.
+- Bad: reuse Claude/Codex required-module assumptions for Pi and require an attention hook that Pi does not provide.
+- Bad: listen to both `before_agent_start` and `agent_start` for the same running event; this duplicates replay and notification traffic.
+- Bad: await `postHookEvent` from a Pi lifecycle handler; a slow loopback bridge then adds network latency to every prompt.
+
+> **Warning**: Pi status must derive `hooks_feature_installed` and `hooks_trusted`
+> from marker ownership. Leaving either flag true after the managed extension is
+> removed makes `status_from_checks` report an installed or partial Hook after
+> uninstall.
+
+### 6. Tests Required
+
+- Rust: full install reports `HookInstallStatus::Installed`, contains `session_start`, `agent_start`, and `agent_settled`, and does not contain `before_agent_start`.
+- Rust: one selected module reports `HookInstallStatus::PartialInstalled`.
+- Rust: install against an unowned same-name extension returns `pi_extension_conflict` and preserves exact content.
+- Rust: install then uninstall removes the marker-owned extension.
+- Rust: generated Pi extension source uses `void postHookEvent` for every lifecycle mapping, contains `AbortController` and `HOOK_TIMEOUT_MS = 1_000`, and contains no `await postHookEvent`.
+- TypeScript: type-check after frontend status or localized error handling changes.
+- Manual: verify Hook settings in `zh-CN`, `zh-TW`, and `en-US`, then start one Pi run and confirm exactly one running transition.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+// A single universal required-module list makes Pi permanently partial.
+let required = [session_start, running, attention, stop, feature];
+```
+
+```typescript
+pi.on("before_agent_start", reportRunning);
+pi.on("agent_start", reportRunning);
+```
+
+```typescript
+pi.on("agent_start", async (_event, ctx) => {
+  await postHookEvent("UserPromptSubmit", readSessionId(ctx));
+});
+```
+
+#### Correct
+
+```rust
+if checks.attention_hook_required {
+    values.push(checks.attention_hook_installed);
+}
+```
+
+```typescript
+pi.on("agent_start", reportRunning);
+```
+
+```typescript
+pi.on("agent_start", (_event, ctx) => {
+  void postHookEvent("UserPromptSubmit", readSessionId(ctx));
+});
+```
+
+## Scenario: Remote Handoff Approval Arbitration Boundaries
+
+### 1. Scope / Trigger
+
+- Trigger: a remote-handoff-managed child emits `PermissionRequest` and the shared local Hook sink must decide whether to defer it for a matching Codex transcript decision.
+- Applies to: `ApprovalArbiterState`, `approval_aware_hook_sink`, remote spool replay, transcript-path normalization, and local/WSL/SSH runtime boundaries.
+
+### 2. Signatures
+
+```text
+ApprovalArbiterState::accept(payload) -> Option<ApprovalRoute>
+approval_aware_hook_sink(payload) -> Hook delivery
+normalize_explicit_transcript_path(path, wslDistroName) -> PathBuf | error
+validate_explicit_transcript_path(path) -> PathBuf | error
+```
+
+### 3. Contracts
+
+- One global sink remains the sole classifier before app, daemon, third-party, and remote-handoff fan-out; no downstream sink may independently defer or duplicate an approval.
+- Only a message-less Codex child event from `local` or `wsl` is a provisional candidate. SSH spool/replay events always deliver immediately.
+- A provisional approval may resolve only against the same source, environment, tab, parent session, and child-agent scope. `Some(session)` and `None` are never equivalent.
+- Local/WSL Codex installs internal `PreToolUse -> ToolStart` and `PostToolUse -> ToolStop` reporters. These events are admitted only to shared arbitration and never reach app, pet, toast, taskbar, system, third-party, or remote-handoff delivery sinks.
+- Tool progress and approval delivery may arrive in either order. A short-lived, bounded, single-consumption progress tombstone uses the exact scoped tool ID when both sides provide one, otherwise the exact tool name; it never crosses source, environment, tab, parent session, or child-agent boundaries.
+- Progress resolves pending approvals before deadline polling, so a matching event received at the grace boundary cannot first fan out a stale approval. Real unresolved approvals retain bounded fallback delivery exactly once.
+- Transcript metadata is read only after explicit path normalization and transcript-root validation. Native metadata polling of `\\wsl$` / `\\wsl.localhost` paths is forbidden.
+- Trusted child and parent transcript candidates are evaluated independently. The Hook-provided byte baseline applies only to the exact path it measured; when absent, the backend captures a native baseline after validation, while WSL UNC candidates never trigger native metadata access.
+- Missing, untrusted, unreadable, or non-local transcript metadata leaves the approval unresolved; the bounded fallback delivery remains authoritative and must never suppress it permanently.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| SSH `PermissionRequest` from spool replay | Forward immediately; do not enter provisional state. |
+| Local/WSL message-less Codex child request | Hold only for the bounded arbitration window. |
+| Matching Codex ToolStart/ToolStop before or after a provisional request | Resolve it silently; no downstream fan-out. |
+| Progress event lacks tool ID | Match only an exact tool name inside the exact child scope. |
+| Source/environment/tab/session/agent mismatch | Do not resolve or cancel the other approval. |
+| Explicit path outside a trusted transcript root | Do not read metadata; use normal fallback delivery. |
+| WSL UNC transcript path | Do not call native `fs::metadata`; rely on Hook event/timing flow. |
+| No decisive transcript event before deadline | Deliver exactly once through the original sink chain. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a local Codex child emits an empty approval followed by a matching transcript decision; only that scoped approval is resolved.
+- Good: an SSH Agent replays a Codex `PermissionRequest`; it reaches normal notification delivery without a 15-second delay.
+- Base: ordinary local approvals keep existing immediate delivery unless they meet every provisional-candidate predicate.
+- Bad: treating a missing session as a wildcard, accepting a spool event as a candidate, or reading an arbitrary UNC path from the payload.
+
+### 6. Tests Required
+
+- Rust tests cover SSH immediate delivery, local/WSL candidate admission, source/environment/session isolation, and timeout fallback delivery.
+- Rust tests cover ToolStart/ToolStop before and after PermissionRequest, exact-name fallback, tool-ID mismatch, multi-child isolation, deadline ordering, tombstone expiry, and zero downstream delivery for internal progress.
+- Rust tests cover rejected untrusted paths and WSL UNC paths without native metadata polling.
+- Hook settings tests cover Codex lifecycle install/status/trust/uninstall; an older installation without `PostToolUse -> ToolStop` must report partial until explicitly reinstalled.
+- Run `cargo fmt --check`, targeted approval/remote Hook tests, `cargo check --lib`, and `git diff --check`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+// A missing session becomes a wildcard and can resolve another child request.
+scope.session_id.as_deref() == payload.session_id.as_deref()
+```
+
+#### Correct
+
+```rust
+// All correlation dimensions, including Option presence, must match exactly.
+scope.source == payload.source
+    && scope.environment == approval_environment(payload)
+    && scope.tab_id == payload.tab_id
+    && scope.session_id == payload.session_id
+    && scope.agent_id == payload.agent_id
+```

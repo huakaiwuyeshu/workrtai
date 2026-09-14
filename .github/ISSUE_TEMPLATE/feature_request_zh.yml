@@ -1,0 +1,35 @@
+name: 功能请求（中文）
+description: 为 CLI-Manager 提出一个聚焦的改进建议。
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请保持需求聚焦。小而明确的功能更容易实现和维护。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 这个功能想解决什么痛点或流程缺口？
+      placeholder: "我希望 ...，因为 ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 建议方案
+      description: 描述最小可用的行为，不要堆功能。
+      placeholder: "增加 ...，这样可以 ..."
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 截图、示例或相关链接。
+    validations:
+      required: false

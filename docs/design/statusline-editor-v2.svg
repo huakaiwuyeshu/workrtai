@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="920" viewBox="0 0 1440 920">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#090d18"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="claude" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d97757"/>
+      <stop offset="1" stop-color="#f2a078"/>
+    </linearGradient>
+    <linearGradient id="codex" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10a37f"/>
+      <stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000" flood-opacity=".28"/>
+    </filter>
+    <style>
+      .ui { font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; }
+      .mono { font-family: "Cascadia Code", "Consolas", monospace; }
+      .title { fill:#f8fafc; font-size:22px; font-weight:700; }
+      .h2 { fill:#e2e8f0; font-size:15px; font-weight:650; }
+      .body { fill:#cbd5e1; font-size:13px; }
+      .muted { fill:#7f8da3; font-size:12px; }
+      .tiny { fill:#94a3b8; font-size:11px; }
+      .card { fill:#131a29; stroke:#263249; stroke-width:1; }
+      .card2 { fill:#0e1523; stroke:#263249; stroke-width:1; }
+      .line { stroke:#263249; stroke-width:1; }
+    </style>
+  </defs>
+  <rect width="1440" height="920" fill="url(#bg)"/>
+
+  <!-- app shell -->
+  <rect x="22" y="20" width="1396" height="880" rx="18" fill="#0b1120" stroke="#28354b" filter="url(#shadow)"/>
+  <rect x="22" y="20" width="226" height="880" rx="18" fill="#0a0f1b"/>
+  <path d="M248 20V900" class="line"/>
+
+  <!-- sidebar -->
+  <circle cx="52" cy="54" r="13" fill="#23c483"/>
+  <text x="75" y="60" class="ui h2">CLI-Manager</text>
+  <text x="45" y="110" class="ui muted">设置</text>
+  <g class="ui body">
+    <text x="56" y="151">通用</text>
+    <text x="56" y="191">终端</text>
+    <text x="56" y="231">快捷键</text>
+    <text x="56" y="271">供应商</text>
+  </g>
+  <rect x="38" y="294" width="192" height="46" rx="10" fill="#172233" stroke="#35c28d"/>
+  <rect x="48" y="306" width="23" height="23" rx="6" fill="#1f9d78"/>
+  <path d="M54 312h11v10H54z M57 309v3 M62 309v3" fill="none" stroke="#eafff8" stroke-width="1.6"/>
+  <text x="82" y="323" class="ui body" fill="#eafff8">状态栏设计</text>
+  <g class="ui body">
+    <text x="56" y="377">Hook</text>
+    <text x="56" y="417">命令提示</text>
+    <text x="56" y="457">侧边栏</text>
+    <text x="56" y="497">开发者</text>
+  </g>
+
+  <!-- header -->
+  <text x="282" y="60" class="ui title">状态栏设计</text>
+  <text x="282" y="84" class="ui muted">为不同 CLI 独立设计状态栏，修改后立即在真实终端样式中预览</text>
+  <rect x="1230" y="43" width="82" height="34" rx="9" fill="#182337" stroke="#334155"/>
+  <text x="1252" y="65" class="ui body">重置</text>
+  <rect x="1322" y="43" width="72" height="34" rx="9" fill="#22a979"/>
+  <text x="1346" y="65" class="ui body" fill="#fff">保存</text>
+
+  <!-- tool separation -->
+  <rect x="282" y="108" width="1112" height="82" rx="14" class="card"/>
+  <text x="302" y="132" class="ui tiny">选择要配置的工具</text>
+  <rect x="302" y="142" width="522" height="34" rx="9" fill="#2b1c1b" stroke="#d97757"/>
+  <circle cx="321" cy="159" r="8" fill="url(#claude)"/>
+  <text x="338" y="164" class="ui body" fill="#ffe8df">Claude Code</text>
+  <text x="708" y="164" class="ui tiny" fill="#e8a78d">独立配置 · 内置渲染</text>
+  <rect x="836" y="142" width="538" height="34" rx="9" fill="#0d2823" stroke="#2a9d7b"/>
+  <circle cx="855" cy="159" r="8" fill="url(#codex)"/>
+  <text x="872" y="164" class="ui body" fill="#dcfff3">Codex</text>
+  <text x="1234" y="164" class="ui tiny" fill="#72d8b8">原生 /statusline</text>
+
+  <!-- three columns -->
+  <rect x="282" y="206" width="250" height="488" rx="14" class="card"/>
+  <text x="302" y="236" class="ui h2">组件库</text>
+  <rect x="302" y="250" width="210" height="34" rx="8" class="card2"/>
+  <text x="318" y="272" class="ui muted">搜索组件…</text>
+  <g class="ui">
+    <text x="302" y="314" class="tiny">核心</text>
+    <rect x="302" y="326" width="210" height="38" rx="8" fill="#182337"/>
+    <circle cx="320" cy="345" r="6" fill="#d97757"/>
+    <text x="336" y="350" class="body">模型</text>
+    <text x="480" y="350" class="muted">＋</text>
+    <rect x="302" y="372" width="210" height="38" rx="8" fill="#182337"/>
+    <circle cx="320" cy="391" r="6" fill="#8b5cf6"/>
+    <text x="336" y="396" class="body">上下文进度</text>
+    <text x="480" y="396" class="muted">＋</text>
+    <text x="302" y="430" class="tiny">Git</text>
+    <rect x="302" y="442" width="210" height="38" rx="8" fill="#182337"/>
+    <circle cx="320" cy="461" r="6" fill="#f59e0b"/>
+    <text x="336" y="466" class="body">Git 分支</text>
+    <text x="480" y="466" class="muted">＋</text>
+    <rect x="302" y="488" width="210" height="38" rx="8" fill="#182337"/>
+    <circle cx="320" cy="507" r="6" fill="#22c55e"/>
+    <text x="336" y="512" class="body">文件变更</text>
+    <text x="480" y="512" class="muted">＋</text>
+    <text x="302" y="546" class="tiny">用量</text>
+    <rect x="302" y="558" width="210" height="38" rx="8" fill="#182337"/>
+    <circle cx="320" cy="577" r="6" fill="#38bdf8"/>
+    <text x="336" y="582" class="body">Token 用量</text>
+    <text x="480" y="582" class="muted">＋</text>
+    <rect x="302" y="604" width="210" height="38" rx="8" fill="#182337"/>
+    <circle cx="320" cy="623" r="6" fill="#ec4899"/>
+    <text x="336" y="628" class="body">5 小时额度</text>
+    <text x="480" y="628" class="muted">＋</text>
+  </g>
+
+  <!-- canvas -->
+  <rect x="546" y="206" width="526" height="488" rx="14" class="card"/>
+  <text x="568" y="236" class="ui h2">Claude Code 布局</text>
+  <text x="927" y="236" class="ui tiny">拖动排序 · 最多 3 行</text>
+  <text x="568" y="274" class="ui tiny">第一行</text>
+  <rect x="568" y="286" width="482" height="68" rx="10" fill="#0c1320" stroke="#34445c" stroke-dasharray="5 5"/>
+  <rect x="580" y="302" width="105" height="36" rx="8" fill="#213044" stroke="#d97757"/>
+  <circle cx="596" cy="320" r="5" fill="#d97757"/>
+  <text x="608" y="325" class="ui body">Claude Opus</text>
+  <rect x="694" y="302" width="107" height="36" rx="8" fill="#213044"/>
+  <text x="711" y="325" class="ui body">Ctx 34%</text>
+  <rect x="810" y="302" width="120" height="36" rx="8" fill="#213044"/>
+  <text x="828" y="325" class="ui body">main +3</text>
+  <text x="568" y="388" class="ui tiny">第二行</text>
+  <rect x="568" y="400" width="482" height="68" rx="10" fill="#0c1320" stroke="#34445c" stroke-dasharray="5 5"/>
+  <rect x="580" y="416" width="132" height="36" rx="8" fill="#213044"/>
+  <text x="598" y="439" class="ui body">Tokens 42.8K</text>
+  <rect x="721" y="416" width="128" height="36" rx="8" fill="#213044"/>
+  <text x="739" y="439" class="ui body">$1.28 · 12m</text>
+  <text x="568" y="502" class="ui tiny">第三行</text>
+  <rect x="568" y="514" width="482" height="68" rx="10" fill="#0c1320" stroke="#34445c" stroke-dasharray="5 5"/>
+  <text x="744" y="552" class="ui muted">拖放组件到这里</text>
+  <rect x="568" y="608" width="152" height="36" rx="8" fill="#172233"/>
+  <text x="590" y="631" class="ui body">Powerline 样式</text>
+  <circle cx="699" cy="626" r="8" fill="#22a979"/>
+  <circle cx="699" cy="626" r="3" fill="#fff"/>
+  <rect x="732" y="608" width="154" height="36" rx="8" fill="#172233"/>
+  <text x="754" y="631" class="ui body">极简模式</text>
+  <circle cx="866" cy="626" r="8" fill="#334155"/>
+
+  <!-- properties -->
+  <rect x="1086" y="206" width="308" height="488" rx="14" class="card"/>
+  <text x="1108" y="236" class="ui h2">组件属性</text>
+  <text x="1108" y="266" class="ui tiny">模型 · model</text>
+  <text x="1108" y="304" class="ui muted">显示格式</text>
+  <rect x="1108" y="316" width="264" height="38" rx="8" class="card2"/>
+  <text x="1124" y="340" class="ui body">标签 + 模型名称</text>
+  <text x="1348" y="340" class="ui muted">⌄</text>
+  <text x="1108" y="386" class="ui muted">前景色</text>
+  <rect x="1108" y="398" width="126" height="38" rx="8" class="card2"/>
+  <circle cx="1127" cy="417" r="7" fill="#d97757"/>
+  <text x="1144" y="422" class="ui body">珊瑚色</text>
+  <text x="1248" y="386" class="ui muted">背景色</text>
+  <rect x="1248" y="398" width="124" height="38" rx="8" class="card2"/>
+  <circle cx="1267" cy="417" r="7" fill="#172233"/>
+  <text x="1284" y="422" class="ui body">透明</text>
+  <text x="1108" y="469" class="ui muted">文本样式</text>
+  <rect x="1108" y="482" width="82" height="34" rx="8" fill="#2b1c1b" stroke="#d97757"/>
+  <text x="1130" y="504" class="ui body">粗体</text>
+  <rect x="1198" y="482" width="82" height="34" rx="8" class="card2"/>
+  <text x="1220" y="504" class="ui body">弱化</text>
+  <rect x="1288" y="482" width="84" height="34" rx="8" class="card2"/>
+  <text x="1308" y="504" class="ui body">隐藏</text>
+  <rect x="1108" y="548" width="264" height="42" rx="9" fill="#311c24" stroke="#7f3346"/>
+  <text x="1192" y="574" class="ui body" fill="#ff9aad">删除组件</text>
+  <text x="1108" y="626" class="ui tiny">Codex 视图会自动切换为原生项目：</text>
+  <text x="1108" y="648" class="ui muted">启用 / 禁用 · 上移 / 下移 · 原生预览</text>
+
+  <!-- live preview -->
+  <rect x="282" y="710" width="1112" height="166" rx="14" fill="#070b12" stroke="#334155"/>
+  <circle cx="306" cy="737" r="6" fill="#22c55e"/>
+  <text x="321" y="742" class="ui h2">实时终端预览</text>
+  <rect x="1185" y="724" width="88" height="28" rx="7" fill="#182337"/>
+  <text x="1204" y="743" class="ui tiny">宽度 100</text>
+  <rect x="1282" y="724" width="92" height="28" rx="7" fill="#182337"/>
+  <text x="1303" y="743" class="ui tiny">深色主题</text>
+  <rect x="304" y="764" width="1068" height="88" rx="9" fill="#020407" stroke="#1f2937"/>
+  <text x="322" y="793" class="mono body" fill="#d97757">Claude Opus</text>
+  <text x="435" y="793" class="mono body" fill="#64748b"></text>
+  <text x="456" y="793" class="mono body" fill="#a78bfa">Ctx 34%</text>
+  <text x="532" y="793" class="mono body" fill="#64748b"></text>
+  <text x="553" y="793" class="mono body" fill="#fbbf24">main +3</text>
+  <text x="322" y="824" class="mono body" fill="#7dd3fc">Tokens 42.8K</text>
+  <text x="448" y="824" class="mono body" fill="#64748b">│</text>
+  <text x="469" y="824" class="mono body" fill="#86efac">$1.28 · 12m</text>
+  <text x="1073" y="824" class="ui tiny">配置变化后 120ms 内刷新</text>
+</svg>

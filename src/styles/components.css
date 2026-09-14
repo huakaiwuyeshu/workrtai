@@ -1,0 +1,16 @@
+@import "./components/surfaces-command-panels.css";
+@import "./components/terminal-empty-tabs.css";
+@import "./components/project-tree.css";
+@import "./components/focus-controls.css";
+@import "./components/history-scroll-markdown.css";
+@import "./components/history-transcript-diff.css";
+@import "./components/workspace-chrome.css";
+@import "./components/terminal-actions-panes.css";
+@import "./components/notifications-actions.css";
+@import "./components/history-messages.css";
+@import "./components/history-transcript.css";
+@import "./components/history-tabs-canvas.css";
+@import "./components/history-process.css";
+@import "./components/history-files.css";
+@import "./components/terminal-background.css";
+@import "./components/file-editor.css";

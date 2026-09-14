@@ -1,0 +1,395 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub mod kimi;
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedHookInput {
+    pub message: Option<String>,
+    pub session_id: Option<String>,
+    pub goal_status: Option<String>,
+    pub goal_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub mcp_server: Option<String>,
+    pub skill_name: Option<String>,
+    pub agent_type: Option<String>,
+    pub agent_transcript_path: Option<String>,
+    pub transcript_path: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct HookExpectedFile {
+    pub role: String,
+    pub canonical_path: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct HookConfigRequest {
+    pub source: String,
+    pub configured_config_root: String,
+    #[serde(default)]
+    pub expected_canonical_root: Option<String>,
+    #[serde(default)]
+    pub expected_files: Vec<HookExpectedFile>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct HookConfigFile {
+    pub role: String,
+    pub canonical_path: String,
+    pub fingerprint: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct HookConfigChange {
+    pub role: String,
+    pub canonical_path: String,
+    pub before_fingerprint: String,
+    pub after_fingerprint: String,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct HookInstallationFile {
+    pub role: String,
+    pub canonical_path: String,
+    pub before_fingerprint: String,
+    pub after_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct HookHistorySourceCandidate {
+    pub source: String,
+    pub canonical_config_root: String,
+    pub config_root_hash: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct HookInstallationRecord {
+    pub source: String,
+    pub installation_id: String,
+    pub owner_id: String,
+    pub configured_config_root: String,
+    pub canonical_config_root: String,
+    pub config_files: Vec<HookInstallationFile>,
+    pub managed_entries: u32,
+    pub adapter_version: u16,
+    pub installed_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_source_candidate: Option<HookHistorySourceCandidate>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct HookConfigReport {
+    pub action: String,
+    pub status: String,
+    pub source: String,
+    pub installation_id: String,
+    pub remote_machine_id: String,
+    pub configured_config_root: String,
+    pub canonical_config_root: String,
+    pub config_root_hash: String,
+    pub config_root_exists: bool,
+    pub will_create_config_root: bool,
+    pub config_files: Vec<HookConfigFile>,
+    pub managed_entries: u32,
+    pub required_entries: u32,
+    pub changes: Vec<HookConfigChange>,
+    pub installation: Option<HookInstallationRecord>,
+}
+
+// 将不同 CLI 的 Hook 字段别名及嵌套工具输入/结果收敛为共享载荷，不修改原始 JSON。
+// Agent/Task 的普通 ToolStart/ToolStop 返回 None，避免与专用子代理事件重复处理。
+// 本函数只提取字段，不验证来源、会话绑定或路径可信性；这些边界由调用方负责。
+pub fn normalize_hook_input(event: &str, hook_input: &Value) -> Option<NormalizedHookInput> {
+    let tool_input = hook_input.get("tool_input");
+    let tool_response = hook_input
+        .get("tool_response")
+        .or_else(|| hook_input.get("tool_result"));
+    let tool_name = first_string(hook_input, &["tool_name", "toolName", "name"])
+        .or_else(|| {
+            tool_input.and_then(|value| first_string(value, &["tool_name", "toolName", "name"]))
+        })
+        .or_else(|| {
+            tool_response.and_then(|value| first_string(value, &["tool_name", "toolName", "name"]))
+        });
+    if matches!(event, "ToolStart" | "ToolStop")
+        && tool_name
+            .as_deref()
+            .is_some_and(|name| matches!(name, "Agent" | "Task"))
+    {
+        return None;
+    }
+    let message = first_string(
+        hook_input,
+        &[
+            "message",
+            "prompt",
+            "notification",
+            "reason",
+            "error_message",
+            "response",
+            "feedback",
+            "error",
+            "display",
+        ],
+    )
+    .or_else(|| {
+        tool_input.and_then(|value| first_string(value, &["prompt", "description", "task"]))
+    });
+    let agent_id = first_string(hook_input, &["agent_id"])
+        .or_else(|| tool_input.and_then(|value| first_string(value, &["agent_id", "agentId"])))
+        .or_else(|| tool_response.and_then(|value| first_string(value, &["agent_id", "agentId"])));
+    let tool_use_id = first_string(hook_input, &["tool_use_id", "toolUseId", "tool_id", "id"])
+        .or_else(|| {
+            tool_input.and_then(|value| first_string(value, &["tool_use_id", "toolUseId", "id"]))
+        });
+    let mcp_server = tool_name
+        .as_deref()
+        .and_then(extract_mcp_server)
+        .or_else(|| first_string(hook_input, &["mcp_server", "mcpServer", "server"]))
+        .or_else(|| {
+            tool_input.and_then(|value| first_string(value, &["mcp_server", "mcpServer", "server"]))
+        })
+        .or_else(|| {
+            tool_response
+                .and_then(|value| first_string(value, &["mcp_server", "mcpServer", "server"]))
+        });
+    let skill_name = tool_input
+        .and_then(|value| first_string(value, &["skill", "skill_name", "skillName"]))
+        .or_else(|| first_string(hook_input, &["skill", "skill_name", "skillName"]));
+    let agent_type = first_string(hook_input, &["agent_type", "agent_name"])
+        .or_else(|| {
+            tool_input.and_then(|value| {
+                first_string(
+                    value,
+                    &["agent_type", "agentType", "subagent_type", "subagentType"],
+                )
+            })
+        })
+        .or_else(|| {
+            tool_response.and_then(|value| {
+                first_string(
+                    value,
+                    &["agent_type", "agentType", "subagent_type", "subagentType"],
+                )
+            })
+        });
+    let agent_transcript_path = first_string(hook_input, &["agent_transcript_path"])
+        .or_else(|| {
+            tool_input.and_then(|value| {
+                first_string(value, &["agent_transcript_path", "agentTranscriptPath"])
+            })
+        })
+        .or_else(|| {
+            tool_response.and_then(|value| {
+                first_string(value, &["agent_transcript_path", "agentTranscriptPath"])
+            })
+        })
+        .or_else(|| {
+            deep_first_string(
+                hook_input,
+                &[
+                    "agent_transcript_path",
+                    "agentTranscriptPath",
+                    "child_transcript_path",
+                    "childTranscriptPath",
+                ],
+            )
+        });
+    Some(NormalizedHookInput {
+        message,
+        // Claude/Codex use snake_case; Grok Build emits camelCase (sessionId).
+        session_id: first_string(hook_input, &["session_id", "sessionId"]),
+        goal_status: first_string(hook_input, &["goal_status", "goalStatus"]),
+        goal_id: first_string(hook_input, &["goal_id", "goalId"]),
+        agent_id,
+        tool_use_id,
+        tool_name,
+        mcp_server,
+        skill_name,
+        agent_type,
+        agent_transcript_path,
+        transcript_path: first_string(hook_input, &["transcript_path", "transcriptPath"]),
+        reasoning_effort: extract_reasoning_effort(hook_input),
+    })
+}
+
+// 按给定键的优先级取本层首个字符串；不递归、不裁剪，也不会跳过空字符串。
+fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_string))
+}
+
+// 优先查当前对象的候选键，再按 JSON 容器迭代顺序深度查找子节点，找到首个字符串即停止。
+fn deep_first_string(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(found) = keys
+                .iter()
+                .find_map(|key| map.get(*key).and_then(Value::as_str).map(str::to_string))
+            {
+                return Some(found);
+            }
+            map.values()
+                .find_map(|child| deep_first_string(child, keys))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|child| deep_first_string(child, keys)),
+        _ => None,
+    }
+}
+
+// 从 mcp__服务器__工具 格式取服务器段并裁剪空白；不验证工具段内容。
+pub fn extract_mcp_server(value: &str) -> Option<String> {
+    let rest = value.strip_prefix("mcp__")?;
+    let (server, _) = rest.split_once("__")?;
+    non_empty_trimmed(server)
+}
+
+// 依次兼容 effort 字符串、effort.level 和旧版扁平别名，返回首个非空级别，不限制级别枚举。
+pub fn extract_reasoning_effort(hook_input: &Value) -> Option<String> {
+    let candidates = [
+        hook_input.get("effort").and_then(Value::as_str),
+        hook_input
+            .get("effort")
+            .and_then(|value| value.get("level"))
+            .and_then(Value::as_str),
+        hook_input.get("reasoning_effort").and_then(Value::as_str),
+        hook_input.get("reasoningEffort").and_then(Value::as_str),
+        hook_input.get("effort_level").and_then(Value::as_str),
+        hook_input.get("effortLevel").and_then(Value::as_str),
+    ];
+    candidates.into_iter().flatten().find_map(non_empty_trimmed)
+}
+
+// 去掉首尾空白后复制字符串；纯空白或空字符串表示没有有效值。
+pub fn non_empty_trimmed(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_mcp_server, extract_reasoning_effort, normalize_hook_input};
+    use serde_json::json;
+
+    #[test]
+    // 验证工具结果中的子代理身份/转录路径与嵌套 effort.level 均可提取。
+    fn normalizes_nested_subagent_fields() {
+        let input = json!({
+            "session_id": "session",
+            "tool_name": "Read",
+            "tool_response": {
+                "agentId": "agent-1",
+                "childTranscriptPath": "/tmp/child.jsonl"
+            },
+            "effort": { "level": " high " }
+        });
+        let normalized = normalize_hook_input("SubagentStop", &input).unwrap();
+        assert_eq!(normalized.session_id.as_deref(), Some("session"));
+        assert_eq!(normalized.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(
+            normalized.agent_transcript_path.as_deref(),
+            Some("/tmp/child.jsonl")
+        );
+        assert_eq!(normalized.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    // 验证 Grok 的 sessionId 驼峰字段不会在共享归一化时丢失。
+    fn normalizes_grok_camel_case_session_id() {
+        // Grok Build hook stdin uses camelCase field names (see Grok hooks docs).
+        let input = json!({
+            "hookEventName": "session_start",
+            "sessionId": "019f8ea7-262f-75b3-acfd-74499dd0013c",
+            "cwd": r"F:\github\CLI-Manager",
+            "workspaceRoot": r"F:\github\CLI-Manager",
+            "timestamp": "2026-07-23T11:00:00Z"
+        });
+        let normalized = normalize_hook_input("SessionStart", &input).unwrap();
+        assert_eq!(
+            normalized.session_id.as_deref(),
+            Some("019f8ea7-262f-75b3-acfd-74499dd0013c")
+        );
+    }
+
+    #[test]
+    // 验证 Kimi 子代理显示名称、完成响应及失败消息映射到通用展示字段。
+    fn normalizes_kimi_subagent_display_and_failure_message() {
+        let subagent = normalize_hook_input(
+            "SubagentStop",
+            &json!({
+                "session_id": "session-kimi",
+                "agent_name": "researcher",
+                "response": "Completed the research"
+            }),
+        )
+        .unwrap();
+        assert_eq!(subagent.session_id.as_deref(), Some("session-kimi"));
+        assert_eq!(subagent.agent_type.as_deref(), Some("researcher"));
+        assert_eq!(subagent.message.as_deref(), Some("Completed the research"));
+
+        let failure = normalize_hook_input(
+            "StopFailure",
+            &json!({ "error_message": "model request failed" }),
+        )
+        .unwrap();
+        assert_eq!(failure.message.as_deref(), Some("model request failed"));
+    }
+
+    #[test]
+    // 验证 Agent 普通工具事件被过滤，而 Read 普通工具事件仍保留。
+    fn ignores_generic_tool_events_for_agent_tools() {
+        assert!(normalize_hook_input("ToolStart", &json!({ "tool_name": "Agent" })).is_none());
+        assert!(normalize_hook_input("ToolStart", &json!({ "tool_name": "Read" })).is_some());
+    }
+
+    #[test]
+    // 验证提问工具名称随 Notification 保留，供通知层区分等待用户回答的事件。
+    fn preserves_question_tool_name_for_notification_bridge() {
+        let normalized = normalize_hook_input(
+            "Notification",
+            &json!({ "tool_name": "request_user_input" }),
+        )
+        .unwrap();
+
+        assert_eq!(normalized.tool_name.as_deref(), Some("request_user_input"));
+    }
+
+    #[test]
+    // 锁定旧 reasoning_effort 字段与标准 MCP 工具名称的解析结果。
+    fn shared_extractors_keep_existing_contracts() {
+        assert_eq!(
+            extract_reasoning_effort(&json!({ "reasoning_effort": "xhigh" })).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            extract_mcp_server("mcp__exa__search").as_deref(),
+            Some("exa")
+        );
+    }
+}

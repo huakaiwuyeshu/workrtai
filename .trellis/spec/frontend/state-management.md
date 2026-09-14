@@ -1,0 +1,751 @@
+# State Management
+
+> How state is managed in this project.
+
+---
+
+## Overview
+
+This project uses **Zustand** for global stores and `tauri-plugin-store` for persistent settings (`settings.json`). Local component state via `useState` is preferred for ephemeral UI.
+
+State ownership follows the feature-first layout:
+
+- Application-wide persisted preferences live in `src/shared/preferences/settingsStore.ts`.
+- Feature-owned state lives under `src/features/<domain>` next to its consumers.
+
+This file records only state patterns verified in the current codebase.
+
+---
+
+## State Categories
+
+- Feature-owned state lives under `src/features/<domain>` next to its consumers.
+- Application-wide persisted preferences live in `src/shared/preferences/settingsStore.ts`.
+
+---
+
+## When to Use Global State
+
+- Keep transient interaction state local to its component.
+- Use a domain store when several components in one feature share lifecycle state.
+- Use shared preferences only for settings consumed across feature boundaries.
+
+---
+
+## Server State
+
+### Convention: Use TanStack Query for historical stats dashboard server state
+
+**What**: Historical usage analytics data fetched through Tauri commands should be loaded with TanStack Query in the dashboard component layer. Keep payload normalization and reusable fetch functions in `historyStore.ts`, but do not drive new dashboard loading states through ad-hoc `useEffect` request sequencing.
+
+**Why**: Historical stats are server state: they are keyed by source, project, time range, and custom history paths, and they need cache freshness, background fetching, error state, and manual refresh. TanStack Query owns those concerns more directly than duplicating cache maps and request sequence guards in each component.
+
+**Correct**:
+
+```tsx
+const statsQuery = useQuery({
+  queryKey: ["historyStats", sourceFilter, projectKey, startAt, endAt],
+  queryFn: () => fetchHistoryStatsPayload({ sourceFilter, projectKey, startAt, endAt }),
+  enabled: open && startAt !== null && endAt !== null,
+});
+```
+
+**Wrong**:
+
+```tsx
+useEffect(() => {
+  let cancelled = false;
+  setLoading(true);
+  void loadStats(params).finally(() => {
+    if (!cancelled) setLoading(false);
+  });
+  return () => {
+    cancelled = true;
+  };
+}, [params]);
+```
+
+**Contracts**:
+
+- Wrap the app once with `QueryClientProvider` from `src/main.tsx`; do not create per-panel clients.
+- Query keys must include every field that changes the backend response: source filter, project key, start/end timestamps, and explicit manual-refresh nonce when forcing a backend refresh.
+- Keep realtime terminal stats on the existing live session/store path unless a separate migration explicitly changes that contract.
+- Keep backend command names and response payload normalization stable; React Query is a frontend cache/fetching mechanism, not a payload schema change.
+
+**Tests**: Run `npx tsc --noEmit` and `npm run build`. Manually verify historical stats filter changes, manual refresh, empty/error states, and bucket session drilldown in the desktop app.
+
+### Convention: Realtime project aggregates use exact-scope stale-while-refresh caching
+
+**What**: The terminal realtime panel may keep a small in-memory cache for the local “today project usage” aggregate because switching tabs can start a slow history aggregation. The cache key must include the project identity, history source, parent project key, and the canonical parent/Worktree path set. A cached value is shown immediately for that exact scope while a fresh request runs in the background.
+
+**Why**: Clearing a valid aggregate on every project switch creates an avoidable blank state, but reusing one unscoped value displays another project's usage. Failed refreshes must retain the last successful value for the same scope.
+
+```tsx
+const scopeKey = JSON.stringify([projectId, source, projectKey, projectPaths]);
+const cached = todayProjectStatsCache.get(scopeKey);
+setTodayStatsState({ scopeKey, value: cached ?? null });
+```
+
+**Contracts**:
+
+- Never read a cached aggregate unless its key exactly matches the current project scope.
+- Store only successful results; a failed refresh may fall back to the previous successful result for that same key.
+- Keep realtime terminal stats on this existing component path; historical dashboard server state continues to use TanStack Query.
+
+**Tests**: Assert that the rendered scope key gates both state and cache reads, and that a failed refresh does not replace a same-scope cached result with an empty state.
+
+---
+
+## Patterns
+
+### Pattern: `migrate*` pure function for every persisted compound field
+
+**Problem**: `tauri-plugin-store` writes whatever JSON shape you give it. Old installs have stale shapes when you add/rename fields. If `load()` trusts the disk blindly, the app crashes on rename or silently uses partial data after type evolution.
+
+**Solution**: For every persisted compound field (object / enum union / list), define a **pure** `migrate*(value: unknown) -> T` that:
+
+1. Returns the typed default if value is null/undefined/wrong-shape
+2. For each sub-field: type-checks, range-clamps, or enum-validates; falls back to default per field
+3. Is **pure** (no I/O, no store access) so it can be unit-tested in isolation
+
+Then call it from `load()`.
+
+**Example** (from `settingsStore.ts`):
+
+```ts
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+export function migrateTerminalBackground(value: unknown): TerminalBackgroundSettings {
+  if (!value || typeof value !== "object") return { ...DEFAULTS.terminalBackground };
+  const v = value as Record<string, unknown>;
+
+  return {
+    enabled: typeof v.enabled === "boolean" ? v.enabled : DEFAULTS.terminalBackground.enabled,
+    imagePath: typeof v.imagePath === "string" || v.imagePath === null
+      ? (v.imagePath as string | null)
+      : DEFAULTS.terminalBackground.imagePath,
+    imageSizeBytes:
+      typeof v.imageSizeBytes === "number" && Number.isFinite(v.imageSizeBytes) && v.imageSizeBytes >= 0
+        ? v.imageSizeBytes
+        : null,
+    opacity: clampNumber(v.opacity, 0, 100, DEFAULTS.terminalBackground.opacity),
+    fit: (["cover","contain","center","tile"] as const).includes(v.fit as TerminalBackgroundFit)
+      ? (v.fit as TerminalBackgroundFit)
+      : DEFAULTS.terminalBackground.fit,
+    // ...same for position, blur, overlayDarken
+  };
+}
+```
+
+**Tests** (when vitest is wired):
+
+- `migrateX(undefined) === DEFAULTS.x`
+- `migrateX(null) === DEFAULTS.x`
+- `migrateX({})` returns defaults
+- Each numeric field: out-of-range value gets clamped
+- Each enum field: unknown literal gets default
+- Each compound: type-mismatched sub-field falls back per-field (others survive)
+
+### Pattern: Primitive persisted settings still need explicit load validation
+
+**Problem**: New primitive settings can look too small to migrate. If `load()` spreads raw `settings.json` entries without validating type, old/manual/corrupt values such as `"true"` or `1` can silently enter React components and break boolean guards.
+
+**Solution**: Add every persisted primitive to `Settings`, `DEFAULTS`, and the `load()` validation block. Booleans must use an explicit `typeof value === "boolean" ? value : DEFAULTS.key` fallback before the final `set()`.
+
+```typescript
+interface Settings {
+  lowMemoryMode: boolean;
+}
+
+const DEFAULTS: Settings = {
+  lowMemoryMode: false,
+  // ...
+};
+
+entries.lowMemoryMode =
+  typeof entries.lowMemoryMode === "boolean"
+    ? entries.lowMemoryMode
+    : DEFAULTS.lowMemoryMode;
+```
+
+**Tests Required**:
+
+- Run `npx tsc --noEmit` after adding the setting.
+- Manual smoke: toggle the setting, restart the app, and verify the value persists.
+
+## Scenario: Project pin preference and sidebar projection
+
+### 1. Scope / Trigger
+
+- Trigger: Adding a project-level pin shortcut that is persisted in shared settings, included in preference backup/sync, and projected into the project sidebar.
+- The pin relationship belongs to the preference layer and is rendered from the current project collection; it does not become a second project record.
+
+### 2. Signatures
+
+- `pinnedProjectIds: string[]` — persisted project IDs in user-selected order.
+- `sidebarPinnedSectionCollapsed: boolean` — persisted disclosure state, default `false`.
+- `migratePinnedProjectIds(value: unknown): string[]` — pure list migration and normalization.
+- `usePinnedProjects(projects: Project[], projectStoreLoaded: boolean)` — derives valid projects and exposes pin/disclosure actions.
+- `SETTING_BACKUP_POLICY.pinnedProjectIds` and `SETTING_BACKUP_POLICY.sidebarPinnedSectionCollapsed` — both map to the `preferences` backup domain.
+
+### 3. Contracts
+
+- `pinnedProjectIds` accepts strings only, removes duplicates while preserving the first occurrence, and appends newly pinned IDs to the end.
+- The derived `pinnedProjects` list joins IDs against the current `Project[]` and preserves persisted order. Unknown IDs are omitted from rendering and cleaned after both settings and the project store are loaded.
+- The pin list is not stored in `Project`, the `projects` table, or tree `sort_order`; project rename, move, and configuration changes therefore keep the same relationship.
+- Workspace restoration refreshes the project cache before applying preferences that contain `pinnedProjectIds`.
+- The sidebar filter control remains governed by `sidebarProjectFilterVisible` and defaults to hidden. Existing pin data must not force the control to appear.
+- The expanded “Pinned” section is a virtual folder-like group. It renders only when the derived list is non-empty; its children are the pinned projects and are excluded from the ordinary sortable tree. The explicit `pinned` filter may show a localized empty state when no valid pin remains.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+| --- | --- |
+| Missing, non-array, or malformed pin setting | Use an empty list after migration. |
+| Duplicate string IDs | Keep the first occurrence and its order. |
+| Pin ID absent from the loaded project collection | Omit it from the derived list; persist cleanup after loading completes. |
+| No valid pinned project | Do not render the virtual pinned folder. |
+| Filter visibility setting is `false` | Keep the three-state filter row hidden, regardless of pin count. |
+| Snapshot includes workspace and preferences | Refresh projects before applying pinned IDs. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: `pinnedProjectIds` stores stable IDs, the hook derives current project objects, and the UI renders a non-empty folder-like shortcut group.
+- Base: An old settings file has no pin keys; defaults produce no pinned group and no filter row.
+- Bad: Add a `pinned` field to each project or force `sidebarProjectFilterVisible` to `true` whenever a pin exists; both duplicate ownership and alter an unrelated user preference.
+
+### 6. Tests Required
+
+- Assert `migratePinnedProjectIds` handles missing values, non-arrays, duplicates, non-string entries, and order preservation.
+- Run `npx tsc --noEmit`, `npm run build`, `npm run check:architecture`, and `npm run check:architecture -- --strict`.
+- Manually verify pin/unpin persistence, project rename/move/delete cleanup, preference restore/sync, no-pin folder absence, one-or-more-pin folder rendering, filter setting off/on, expanded/collapsed sidebar, search, keyboard actions, and zh-CN/en-US labels.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```tsx
+const showFilter = sidebarProjectFilterVisible || pinnedProjects.length > 0;
+return <SidebarHeader showProjectFilter={showFilter} />;
+```
+
+#### Correct
+
+```tsx
+const showFilter = sidebarProjectFilterVisible;
+return (
+  <>
+    <SidebarHeader showProjectFilter={showFilter} />
+    {pinnedProjects.length > 0 && <PinnedProjectSection projects={pinnedProjects} />}
+  </>
+);
+```
+
+### Pattern: Legacy key remapping next to the migration
+
+When a field name or enum value changes between releases, keep a `LEGACY_*_MAP` next to its migrator and translate before validating.
+
+**Example** (from `settingsStore.ts`):
+
+```ts
+const LEGACY_TERMINAL_THEME_MAP: Partial<Record<string, string>> = {
+  luxuryCommerceLight: "saasAnalyticsDashboardLight",
+  cryptoWalletDark: "investmentPlatformDark",
+};
+
+function migrateTerminalThemeName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return LEGACY_TERMINAL_THEME_MAP[value] ?? value;
+}
+```
+
+After migration, the store writes the new key back to disk:
+
+```ts
+if (storedX !== migratedX) await s.set("x", migratedX);
+```
+
+This keeps `settings.json` self-healing: one launch is enough to leave the legacy shape behind.
+
+### Pattern: Transient flags live in the store but stay out of `Settings`
+
+Some state belongs to the store object but **must not be persisted** — e.g. `terminalBackgroundMissing` (computed at load by file-existence check). Keep these fields on the Zustand store but exclude them from the `Settings` interface and from the `DEFAULTS` loop that writes to `tauri-plugin-store`.
+
+**Anti-pattern**: putting `terminalBackgroundMissing` into the `Settings` interface — `load()` will read a stale boolean from disk and skip the actual file check.
+
+**Pattern**:
+
+```ts
+interface Settings {
+  // …persisted fields only
+  terminalBackground: TerminalBackgroundSettings;
+}
+
+interface SettingsStore extends Settings {
+  // …transient runtime flags
+  terminalBackgroundMissing: boolean;
+  clearTerminalBackgroundMissing: () => void;
+}
+```
+
+`load()` recomputes the flag every launch; it is never written to `settings.json`.
+
+### Scenario: Replay snapshot patch file storage
+
+#### 1. Scope / Trigger
+
+- Trigger: changing AI Replay snapshot persistence, loading, rollback, fork, or startup DB cleanup behavior.
+- Problem: AI Replay code snapshots can contain large unified diff text. Storing that text directly in `ai_replay_events.payload_json` makes `cli-manager.db` grow quickly and keeps routine metadata queries tied to large payload rows.
+
+#### 2. Signatures
+
+- SQLite table: `ai_replay_events(kind, session_key, event_index, payload_json)`.
+- Snapshot DB payload fields: `checkpointId`, `patchPath`, `patchStorage`, `patchBytes`, optional legacy `patch`.
+- Snapshot file path: `.cli-manager/replay-snapshots/<session>/<checkpoint>.patch`.
+- Frontend store helpers: `writeSnapshotPatchFile(...)`, `hydrateSnapshotPayload(...)`, `persistReplayEvent(...)`.
+- Startup backend command: `db_repair_known_migration_drift()`.
+
+#### 3. Contracts
+
+- Do not write snapshot patch files into the user project repository; they must stay under CLI-Manager's data directory.
+- New snapshot DB payloads must persist `patchPath`, `patchStorage="file"`, and `patchBytes`, not the full `patch` text.
+- Loading Replay events must hydrate `event.payload.patch` from `patchPath` before UI snapshot actions read it.
+- Old rows with inline `payload.patch` must remain readable for compatibility.
+- Startup DB repair must run the inline snapshot cleanup at most once per app version before `Database.load(...)`; when the current-version marker exists, it must skip the cleanup query entirely.
+- If a patch file is missing, keep the snapshot metadata visible but leave diff, rollback, and fork unavailable for that event.
+- For rollback/fork, compare the latest hydrated snapshot patch against the current worktree patch before mutating files.
+
+#### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| New snapshot has non-empty patch | Write file, persist metadata only, keep in-memory event hydrated. |
+| Legacy snapshot still has inline `patch` | Load directly and keep snapshot actions available. |
+| Startup cleanup sees inline `patch` and no current-version marker | Write file, remove inline field, add metadata, checkpoint/VACUUM DB, then write the marker. |
+| Current-version cleanup marker exists | Skip the cleanup query entirely. |
+| Snapshot file missing or unreadable | Log warning, keep metadata visible, leave patch-dependent actions unavailable. |
+| Malformed snapshot payload JSON during cleanup | Skip that row and continue; do not block app startup. |
+
+#### 5. Good/Base/Bad Cases
+
+- Good: after update, old inline snapshots are migrated once for that app version and `cli-manager.db` no longer carries large `payload.patch` fields.
+- Base: already-checked installs on the same version start normally; cleanup is skipped by marker.
+- Bad: writing patch files into the current project repo, because AI Replay metadata would pollute user worktrees.
+
+### Scenario: SSH Hook events are not local Replay projects
+
+- Trigger: `recordCliHookEvent` receives a Hook payload with `environmentType = "ssh"`.
+- Remote `cwd` is an opaque display/reference value. Do not use it as `projectPath`, pass it to local Git snapshot commands, or route it through local file APIs.
+- Persist the event metadata and raw remote reference for Replay visibility, but force the session's local `projectPath` to `null` and skip automatic code snapshots. Local and WSL payloads keep the existing `cwd` and snapshot behavior.
+- Bad: deleting legacy inline `patch` before the patch file is written, because rollback/fork would lose the snapshot content.
+
+#### 6. Tests Required
+
+- Run `npx tsc --noEmit`.
+- Run `cd src-tauri && cargo check`.
+- Run `cd src-tauri && cargo test db_repair --lib`.
+- Assert new snapshot `payload_json` has `patchPath` but no inline `patch`.
+- Assert startup cleanup migrates inline snapshots to files, removes `patch`, and skips entirely when the current-version marker exists.
+
+#### 7. Wrong vs Correct
+
+##### Wrong
+
+```json
+{"checkpointId":"snapshot-1","patch":"diff --git ..."}
+```
+
+##### Correct
+
+```json
+{"checkpointId":"snapshot-1","patchPath":"replay-snapshots/session/snapshot-1.patch","patchStorage":"file","patchBytes":1234}
+```
+
+### Pattern: Pane tree drag-split moves existing sessions only
+
+**Problem**: A terminal tab represents a live PTY session. Dragging it to a pane edge must not create a new PTY or duplicate the terminal, otherwise the UI would show two tabs for different processes while the user expected a layout move.
+
+**Solution**: Keep pane layout as a pure tree transform. The store action should accept the existing `sessionId`, `targetPaneId`, and edge, then move that session id into a new leaf created around the target pane.
+
+```typescript
+type TerminalPaneDropEdge = "left" | "right" | "top" | "bottom";
+
+splitSessionToPaneEdge(sessionId: string, targetPaneId: string, edge: TerminalPaneDropEdge): void;
+```
+
+**Contracts**:
+
+- Same pane + one tab: no-op; do not create an empty split.
+- Same pane + multiple tabs: remove `sessionId` from the original leaf, create a new leaf on the requested edge, and keep the remaining tabs in the original leaf.
+- Cross pane: remove `sessionId` from its source leaf, split the target leaf, and normalize any empty source leaf.
+- Never call `pty_create`; this is a layout/session move, not terminal creation.
+
+**Good/Base/Bad Cases**:
+
+- Good: dragging tab A to the right edge of pane B creates a horizontal split where A is in the new right leaf.
+- Base: dragging tab A to the center of pane B moves A into pane B without changing split structure.
+- Bad: dragging the only tab in pane A to pane A's own edge creates an empty pane; this must stay a no-op.
+
+**Tests Required**:
+
+- Assert no duplicate `sessionId` exists after every move.
+- Assert total session id set is unchanged after edge split.
+- Assert same-pane single-tab edge split returns `changed: false`.
+- Assert `activePaneId` and `activeSessionId` point to the moved tab when a split succeeds.
+
+### Pattern: Workspans own pane trees; terminalStore exposes the active layout mirror
+
+**Problem**: Multiple top-level terminal workspaces need independent pane layouts, but existing UI and actions read `terminalStore.paneTree`, `activePaneId`, and `activeSessionId` directly. Replacing those fields outright would create broad churn and make background events mutate the wrong workspace.
+
+**Solution**: Persist a `TerminalWorkspan[]` collection where each item owns its pane tree and active state. Keep the three existing terminalStore fields as a compatibility mirror of the active Workspan. Every pane mutation must update the active Workspan and the mirror in the same Zustand `set()` call.
+
+**Contracts**:
+
+- Every live session belongs to exactly one Workspan; merging Workspans moves existing session IDs and never calls `pty_create`.
+- `settingsStore.workspanEnabled` defaults to `true`. When disabled, keep one internal Workspan as the persistence container for the legacy global `paneTree`; do not introduce a second layout schema.
+- Disabling Workspan preserves the active Workspan's complete Pane tree, appends sessions from other Workspans to the active Pane as tabs, and must not call `pty_create` or `pty_close`. Re-enabling keeps that complete tree as one Workspan; only later ordinary terminal creation starts new Workspans.
+- Switching Workspans replaces the active mirror without unmounting or closing sessions in inactive Workspans.
+- Every active Workspan change must scroll its top-level tab into the visible tab-strip viewport after render. This is presentation-only: keep Workspan order, tab widths, and manual horizontal scrolling unchanged.
+- Keyboard and mouse side-button Tab navigation must prefer the existing active Pane resolver. If that resolver returns the current session because the active Workspan has no other navigable Pane/Tab, fall back to the adjacent Workspan's active session in top-level order; `setActive(sessionId)` then switches the Workspan mirror.
+- The Workspan overflow dropdown is presentation state only. Render the dropdown trigger only when the complete tab contents exceed the full tab bar width, and list only tabs outside the current scroll viewport or partially clipped by it. Do not persist hidden-tab state or duplicate tab ordering in the store.
+- Background events such as subagent transcript creation locate the parent session's Workspan and mutate that Workspan even when it is inactive; they must not steal focus.
+- Closing the last session removes its Workspan and selects an adjacent Workspan. Closing a session in an inactive Workspan must keep the current Workspan active.
+- Persist only Workspans containing persistable sessions. Filter transient file editor, synced history, and subagent transcript sessions before writing.
+- `TerminalWorkspan.customTitle` is nullable and persists with the layout. A trimmed blank value clears it; the view then falls back to the single-session title or localized `Workspan · N` label.
+- PTY restoration creates new session IDs. Restore Workspan trees through the old-to-new session ID map before selecting the active Workspan.
+- Workspan edge-drop inserts the complete source pane tree beside the hovered target pane; it must preserve the full session ID set without duplicates.
+- Inactive Workspans stay mounted but hidden so xterm scrollback and live output survive switching.
+- With Workspan enabled, hide a local tab bar only when the visible layout has one pane with one session; split Workspan panes keep a compact tab bar with the session title, close, drag, fullscreen, and current-Tab restore controls. The Pane restore control detaches only the current Tab into a standalone top-level Workspan; the Workspan context-menu restore detaches every Tab. With Workspan disabled, every visible Pane keeps its local terminal Tab bar.
+- Restoring a Workspan detaches each session into its own top-level Workspan in deterministic tree order without creating or closing PTYs. Restoring an individual Tab inserts its standalone Workspan beside the source Workspan and activates it; a single-session Workspan is not detached.
+- Dragging a Pane Tab onto a top-level Workspan tab detaches only that session and inserts a standalone Workspan before the target; dragging onto the unused tab-strip area appends it. The action preserves the PTY and does nothing while a scoped terminal filter is active.
+- Async PTY creation must re-resolve the source session's current Workspan and pane after every await. If the source session was closed, unsubscribe the new listener, close the abandoned PTY, and do not add an unowned session.
+- Project/group/worktree scoped views may show a filtered Workspan layout, but bulk close actions must use only session IDs from that filtered tree; hidden sessions remain untouched.
+- Multi-session close operations must be serialized so older persistence writes cannot overwrite the final Workspan/session snapshot.
+
+**Tests Required**:
+
+- Run `npx tsc --noEmit`.
+- Assert Workspan merge preserves the complete session ID set with no duplicates.
+- Assert legacy collapse preserves the active Pane tree, appends other Workspan sessions in deterministic order, and keeps every session ID exactly once.
+- Assert sanitization keeps a session ID in only one pane even when persisted layout data contains duplicates.
+- Assert adjacent Workspan navigation supports forward/backward movement and wraps at both ends without changing the existing multi-Tab or multi-Pane priority.
+- Assert persisted custom titles are trimmed, blank titles migrate to `null`, and restore/sanitize operations preserve non-empty titles.
+- Assert restoring a Workspan creates one standalone Workspan per session in deterministic order.
+- Assert restoring one Tab detaches only that Tab into a standalone Workspan and leaves the source Workspan's remaining sessions intact.
+- Assert single-Tab detachment supports adjacent, explicit-index, and end insertion without duplicate or lost session IDs; a single-session Workspan is unchanged.
+- Manual desktop verification: switch Workspans, change split ratios, restart, and verify each layout restores with the correct active session.
+- Manual desktop verification: with enough Workspans to overflow the tab strip, verify the dropdown trigger appears only while overflowing, the dropdown lists only hidden or partially clipped tabs, and activating the last Workspan through the dropdown, keyboard, or another navigation entry makes its tab visible without reordering tabs; mouse horizontal scrolling must still work.
+- Manual desktop verification: close focused and inactive sessions, and verify Workspan selection remains correct.
+- Manual desktop verification: start a split, then move/close its source Workspan before PTY creation completes; no orphan tab or stale layout may appear.
+- Manual desktop verification: in a scoped view, closing a Workspan tab closes only visible sessions and preserves hidden project sessions.
+- Manual desktop verification: split a Workspan until each pane has one session, then verify each pane still exposes its title, close, drag, and fullscreen/restore controls; use the Workspan context menu to restore the complete layout to the active pane without changing inactive focus.
+
+### Pattern: Worktree records are project state; worktree sessions are terminal metadata
+
+**Problem**: A Git worktree is a persistent checkout on disk, but an open terminal tab inside it is transient. If worktree identity lives only on `TerminalSession`, app restart loses the project-tree child item; if it lives only in the database, tab badges and finish-task menus cannot tell which checkout a running tab belongs to.
+
+**Solution**: Store durable worktree lifecycle records in `worktreeStore` / the `worktrees` SQLite table, and store only the optional pointer on terminal sessions.
+
+```typescript
+interface WorktreeRecord {
+  id: string;
+  project_id: string;
+  name: string;
+  branch: string;
+  path: string;
+  base_branch: string;
+  deps_prompt_dismissed: number;
+  status: "active" | "missing";
+}
+
+interface TerminalSession {
+  worktreeId?: string;
+}
+```
+
+**Contracts**:
+
+- `worktreeStore.loadWorktrees()` runs during startup before the project tree needs worktree child nodes.
+- `projectStore.buildTree()` may include worktree child nodes, but it must not own Git lifecycle actions.
+- `TerminalSession.worktreeId` is metadata for badges, menus, stats, and install tabs; it is not the source of truth for whether a worktree exists.
+- UI surfaces that operate on filesystem/history scope (file panel, realtime stats, history entry points, Git branch queries) must resolve the active worktree path when a session belongs to a worktree. Do not reuse the parent project path for these path-scoped views.
+- History's visible project filter remains the parent project path for worktree history entry points; use a separate scoped/effective path for the backend history query when the list must be limited to one worktree.
+- When a derived `Project` is needed for a worktree file context, keep the parent project id but replace `path` with the worktree path, and compare contexts by `id + normalized path`, not `id` alone.
+- Sidebar/tree selection uses `TerminalSession.worktreeId` as the tab-to-worktree bridge: activating a worktree tab should select and reveal that worktree node; selecting a worktree node should activate an already-open PTY session for that worktree when one exists.
+- Missing worktree directories remain visible as `status="missing"` until the user cleans the stale record; do not silently hide them from the project tree.
+- Dependency prompt dismissal belongs to the worktree record, not the terminal tab, because multiple tabs may point at the same worktree.
+- `disabled` isolation strategy preserves pre-worktree behavior: always open a normal project terminal, without Git validation, prompt, or automatic worktree creation.
+- `prompt` / `autoParallel` isolation decisions are based on project CLI configuration plus an existing same-project PTY session, not visible tab `running` state, startup commands, or shell process liveness. Projects without a configured CLI tool must not trigger these two strategies for ordinary terminal usage.
+- `always` still creates a worktree for every project launch, but only after Git validation confirms a local project that supports `git worktree`; non-Git and unsupported WSL paths open normally.
+
+**Good/Base/Bad Cases**:
+
+- Good: after app restart, no terminal sessions are restored, but the project tree still shows active/missing worktree records loaded from SQLite.
+- Good: switching from worktree tab A to worktree tab B updates the selected project-tree child from A to B without opening new terminals.
+- Base: an install-dependencies tab and the task tab share the same `worktreeId`, so both display the same worktree badge.
+- Bad: closing the last tab for a worktree deletes the database record. Closing a tab is not equivalent to discarding a checkout.
+- Bad: selecting a worktree row always opens another terminal even when a matching worktree tab is already open.
+
+**Tests Required**:
+
+- Type-check that `TreeNode` handles `worktree` nodes everywhere a project tree is rendered.
+- Manual verification: restart app after creating a worktree; the worktree child row remains even though terminals are not restored.
+- Manual verification: dismissing dependency prompt for one worktree does not affect a different worktree of the same project.
+
+### Pattern: Project-scoped terminal filtering derives a visible pane tree
+
+**Problem**: A project-only terminal view is a presentation concern. If the UI mutates the real `sessions` array or `paneTree` to hide other projects, background sessions disappear from state, pane operations close the wrong tabs, and leaving scoped mode cannot reconstruct the original layout.
+
+**Solution**: Keep the store state authoritative and derive a filtered pane tree in the view layer. Filter by resolved project ownership per session, then pass the filtered leaves into tab rendering and pane-level close actions.
+
+```typescript
+const scopedSessionIds = new Set(
+  sessions
+    .filter((session) => resolveProjectForSession(session, sessions, projects, projectById)?.id === projectScopeProjectId)
+    .map((session) => session.id)
+);
+
+const visiblePaneTree = filterPaneTreeBySessionIds(paneTree, scopedSessionIds);
+const visiblePanes = collectPaneLeaves(visiblePaneTree);
+```
+
+**Contracts**:
+
+- `sessions` and the persisted `paneTree` remain unchanged when toggling project scope.
+- The filtered tree controls presentation geometry only. Render every original Workspan/Pane leaf under its stable parent and key so scoped switches update `isVisible` without disposing or recreating `XTermTerminal`.
+- Filtering must use resolved ownership for derived sessions such as subagent transcript tabs, not only `session.projectId`.
+- Pane/tab bulk actions in scoped mode must operate on the filtered leaves, so hidden tabs from other projects are untouched.
+- Disabling scoped mode must immediately restore the original all-project layout without rebuilding pane state.
+
+**Good/Base/Bad Cases**:
+
+- Good: project A scope shows only A tabs, and `close others` leaves hidden project B tabs intact in the store.
+- Base: selecting "All Terminals" bypasses filtering and renders the original pane tree.
+- Bad: removing non-matching sessions from `terminalStore.sessions` or rewriting `paneTree` during filtering.
+- Bad: moving hidden PTY sessions into a separate offscreen render branch with a different parent or key; this serializes and replays full scrollback on every scope switch.
+
+**Tests Required**:
+
+- Type-check that scoped rendering paths consume `visiblePaneTree` / `visibleSessions` instead of raw `paneTree` / `sessions`.
+- Regression-test that filtering collapses the visible tree without mutating the original mounted tree or its leaf identities.
+- Manual desktop verification: scoped mode on/off restores the same tab layout; project empty state appears when the chosen project has no open terminals; hidden-project tabs survive scoped close operations.
+- Manual desktop verification: repeatedly switch projects with long terminal scrollback and confirm the terminal does not progressively replay, flash black, or require a window resize to repaint.
+
+---
+
+### Pattern: Narrow selectors for always-mounted UI
+
+**Problem**: Zustand store actions such as terminal output/status updates and sub-agent transcript appends can fire at high frequency. A component mounted in a persistent toolbar/sidebar that calls a whole-store hook (for example `useTerminalStore()` without a selector) rerenders on every unrelated store change, even when none of the fields it displays changed.
+
+**Solution**: Always-mounted components must subscribe only to the fields they render or invoke. Use `useShallow` when selecting multiple fields, and keep popover/settings screens as the exception only when they are mounted on demand and not on a hot path.
+
+```typescript
+// Good: only rerenders when these fields change.
+const { sessions, activeSessionId } = useTerminalStore(
+  useShallow((s) => ({
+    sessions: s.sessions,
+    activeSessionId: s.activeSessionId,
+  }))
+);
+
+// Bad: rerenders on every terminalStore mutation, including transcript appends.
+const { sessions, activeSessionId } = useTerminalStore();
+```
+
+**Why**: This prevents background transcript/event traffic from stealing the main thread and making terminal typing or tab switching lag.
+
+**Tests Required**:
+
+- Type-check after selector changes.
+- Manual profiling for toolbar/sidebar components during high-frequency terminal or transcript updates; unrelated components should not rerender each tick.
+
+### Pattern: Workspace layout keeps dock positions separate from visibility
+
+**Problem**: The project sidebar and terminal auxiliary region are both side regions, but they have different state owners. Treating their visibility or position as one toggle makes it impossible to compose layouts such as `auxiliary panel | terminal | project sidebar`, and a Workspan visibility button can appear to succeed when no Workspan tab exists to render.
+
+**Solution**: Keep the layout dimensions in the persisted `workspaceLayout` object while retaining local ownership of sidebar width/collapse and terminal panel content state.
+
+```typescript
+interface WorkspaceLayoutSettings {
+  version: 3;
+  projectSidebarSide: "left" | "right";
+  terminalSidePanelSide: "left" | "right";
+  terminalSidePanelVisible: boolean;
+  workspanTabBarPosition: "top" | "bottom";
+  workspanTabBarVisible: boolean;
+}
+```
+
+**Contracts**:
+
+- `migrateWorkspaceLayout(value: unknown)` validates every field and migrates old/missing values to project-sidebar-left, auxiliary-panel-right, Workspan-top, with both visibility flags `true`.
+- `App` uses `projectSidebarSide` only to change the flex order of the project sidebar and terminal main area. It must not move or recreate a PTY, pane tree, terminal panel, or history workspace.
+- A right-docked project sidebar mirrors its separator, collapse affordance, and width-resize calculation to the edge facing the terminal; `sidebarWidth` and collapse state remain the existing `Sidebar` state.
+- `terminalSidePanelSide` independently controls the auxiliary panel frames. Its action rail follows the same side and sits on the outer edge, remaining the entry point for restoring a hidden auxiliary region; side-opening popovers must follow the action rail.
+- The Workspan quick control and menu action are disabled when Workspan is disabled or `terminalStore.workspans` is empty; a disabled action must not persist a visibility change that has no rendered effect.
+- Layout updates use `updateWorkspaceLayout(current, patch)` and the existing `settingsStore.update("workspaceLayout", ...)` path. No database, IPC, or PTY contract is added.
+
+**Good/Base/Bad Cases**:
+
+- Good: choose project sidebar right and auxiliary panel left; the visible order is action rail, auxiliary panel, terminal center, project sidebar, and both widths remain adjustable from their terminal-facing edges.
+- Base: default layout is project sidebar left and auxiliary panel right; existing terminal sessions and panel contents behave unchanged.
+- Bad: reverse only the DOM order while leaving the project sidebar resize math and right-edge handle unchanged, because dragging the right-docked sidebar would change the width in the wrong direction.
+- Bad: toggle `workspanTabBarVisible` while no Workspan exists, because the UI reports a successful state change without any visible result.
+
+**Tests Required**:
+
+- Static contract tests assert layout migration, App order wiring, right-docked resize direction, mirrored header controls, and independent menu actions.
+- Run `node --test scripts/projectSidebarDocking.test.mjs scripts/workspaceLayoutState.test.mjs scripts/workspaceLayoutControls.test.mjs`.
+- Run `npx tsc --noEmit` and `npm run build`; manually verify left/right combinations, collapsed/expanded width behavior, no-Workspan disabled feedback, settings/history opaque surfaces, and both background-fill modes.
+
+---
+
+## Common Mistakes
+
+### Pattern: File editor workspaces follow file locations, not the active terminal
+
+**Problem**: Each project can keep its own file-editor pseudo session, but `fileExplorerStore` exposes one active project mirror. Clearing `openFiles` whenever the active terminal changes makes inactive editor tabs lose previews and unsaved content.
+
+**Solution**: Keep in-memory editor workspaces keyed by file location. Local, WSL, and Worktree contexts use the normalized path; SSH contexts use the host id and normalized remote root. Before switching the active file project, snapshot `openFiles` and `activeFilePath`; restore the target workspace into the existing active mirror.
+
+**Contracts**:
+
+- Project switching never discards open files or unsaved content and therefore must not show a discard-on-switch prompt.
+- Closing a Files side panel snapshots the active editor state. One project file-editor Tab may visit multiple locations (for example, the main checkout and its Worktrees); closing that Tab clears every cached location owned by the project id.
+- Async open/save results update their originating workspace and must not mutate the newly active project.
+- Editor workspaces are process memory only. Do not persist drafts or reopen them after app restart.
+- Remote file consumers still release on project switch; only editor file data is retained.
+- An effect that calls `openProject` must read the current project with `useFileExplorerStore.getState()` inside the effect or callback. Do not make that synchronization callback depend on the same `project` field it writes, because mounted file panels can otherwise form a render/effect feedback loop during Tab switches.
+
+```typescript
+// Wrong: switching locations destroys editor state.
+set({ project, openFiles: [], activeFilePath: null, activeFile: null });
+
+// Correct: snapshot the current mirror and restore the target location.
+const workspaces = upsertEditorWorkspace(state.editorWorkspaces, current, state.openFiles, state.activeFilePath);
+const target = findEditorWorkspace(workspaces, project);
+set({ project, openFiles: target?.openFiles ?? [], activeFilePath: target?.activeFilePath ?? null });
+
+// Correct: project synchronization reads a current snapshot without subscribing
+// the effect callback to its own write target.
+const current = useFileExplorerStore.getState().project;
+if (!isSameProjectFileContext(current, project)) await openProject(project);
+```
+
+**Tests Required**:
+
+- Switch between two local/WSL/SSH/Worktree locations and restore file order, active file, and dirty content.
+- Close active and inactive editor Tabs, including bulk Workspan close, and verify dirty confirmation and workspace cleanup.
+- Complete a file open or save after switching projects and verify the result stays in the originating workspace.
+- Keep both the Files side panel and a file-editor Tab mounted, switch terminal Tabs, and verify project synchronization does not repeatedly call `openProject`.
+
+### Pattern: File-tab batch close keeps ordering in the view and draft safety in the pane
+
+**Problem**: A file-tab context menu needs the current visual order for “close others/left/right”, but `fileExplorerStore.closeFile` owns active-file fallback. Closing a clean prefix before discovering a dirty file silently changes the workspace before the user can cancel.
+
+**Solution**: `FileEditorTabs` derives ordered target paths from its rendered `files` array and passes them to `FileEditorPane`. The Pane filters the current visible workspace, snapshots target and dirty paths, and only invokes `closeFile` after no draft is involved or after the user chooses Save/Discard.
+
+```tsx
+const leftPaths = files.slice(0, index).map((file) => file.path);
+const dirtyPaths = targetFiles
+  .filter((file) => file.content !== file.savedContent)
+  .map((file) => file.path);
+
+if (dirtyPaths.length > 0) {
+  setPendingAction({ closePane: false, paths: targetPaths, dirtyPaths });
+  return;
+}
+targetPaths.forEach(closeFile);
+```
+
+**Contracts**:
+
+- File-tab menus operate only on ordinary `ActiveProjectFile` tabs in the active file location. They never include pinned Git Diff tabs, terminal sessions, Workspans, or another cached editor workspace.
+- “Others” excludes the clicked path; “left” and “right” follow the rendered file-tab order. Actions with an empty target are disabled.
+- A target set with one or more dirty files opens one confirmation before any target is closed. Save writes only the selected dirty paths; Discard closes only selected paths; Cancel leaves every selected path unchanged.
+- Keep `fileExplorerStore.closeFile` as the only close mutation so its existing active-file fallback and workspace behavior remain authoritative. Do not add a parallel bulk-close store implementation.
+- SSH remains read-only: the menu itself does not invoke remote mutation, and any existing save failure continues to leave the confirmation state intact.
+
+**Tests Required**:
+
+- Static regression coverage asserts all four file-specific i18n actions, target ordering, empty-target disabling, batch dirty handoff, and absence of terminal menu keys.
+- Manually verify clean and dirty batches in local/WSL/SSH/Worktree locations, a split file-editor Pane, and alongside pinned Git Diff tabs in `zh-CN`, `zh-TW`, and `en-US`.
+
+### Pattern: File refresh ownership follows the editor workspace lifecycle
+
+**Problem**: A file editor can remain mounted after its Files side panel or embedded file panel is hidden. Owning watcher setup, fallback polling, or focus refresh in the conditional panel silently stops clean-file refresh while the editor is still visible.
+
+**Solution**: Mount one nonvisual project-file refresh controller with `App`. It owns local watcher start/stop, WSL watcher-failure polling, changed-path debounce, and focus/visibility refresh. `fileExplorerStore.refreshVisibleState` remains the only single-flight queue and the authority for preserving dirty drafts.
+
+**Contracts**:
+
+- Local and WSL projects prefer `project-files-changed`; watcher failure falls back to the existing low-frequency interval. The controller passes changed paths through instead of forcing a full tree reload.
+- SSH has no watcher. Poll only when its validated remote file context exists and the active workspace has opened files; automatic list/read calls are silent, while explicit user list/open/search calls retain background-operation feedback.
+- SSH refresh must continue to fail closed when the remote context is absent. It never calls local `file_*` commands for an SSH project.
+- A dirty file (`content !== savedContent`) remains a local draft after every automatic trigger. A clean file reloads only when its `modifiedMs` or `sizeBytes` changed.
+- Sidebar-local state such as the `.gitignore` matcher may retain its own lightweight event listener, but must not own watcher or refresh lifecycle.
+
+**Tests Required**:
+
+- Hide the Files panel with an editor still open, then verify local/WSL clean-file refresh, dirty-draft preservation, and watcher cleanup on project change.
+- Verify SSH context gating, 15-second quiet polling, focus refresh, and no local-path fallback.
+
+### Common Mistake: Reloading the file tree when only project metadata changes
+
+**Symptom**: Switching terminal tabs that point to the same directory resets the right-side file tree, including its expanded rows and scroll position.
+
+**Cause**: Treating a new `Project` object or a different project record id as a different file location and calling `fileExplorerStore.openProject` again.
+
+**Fix**: Make `openProject` idempotent by file location. Local contexts compare normalized paths. SSH contexts compare environment type, host id, and normalized remote root. When the location is unchanged, update project metadata only and preserve the loaded tree, open files, and remote consumer.
+
+```typescript
+if (isSameProjectFileLocation(current, project)) {
+  if (current !== project) set({ project });
+  return;
+}
+```
+
+**Tests Required**:
+
+- Assert same local paths with different project ids do not enter the root-listing path.
+- Assert same SSH host and remote root do not rebuild the remote file context.
+- Assert a different local path, Worktree path, SSH host, or remote root still reloads the tree.
+
+### Common Mistake: Replacing a refreshed tree branch and dropping loaded descendants
+
+**Symptom**: A file tree folder is still marked expanded, but after moving/copying items the row collapses visually, the tree height changes, and the scroll container may jump toward the top.
+
+**Cause**: Backend directory listing commands usually return only one level of children. Replacing a parent directory with that shallow result drops already loaded `children` on expanded descendants.
+
+**Fix**: When refreshing one or more affected directories, preserve existing loaded descendant `children` for unchanged paths, then apply the explicitly refreshed directories from ancestor to descendant.
+
+```typescript
+const refreshPaths = Array.from(new Set([targetParentPath, sourceParentPath]))
+  .sort((a, b) => pathDepth(a) - pathDepth(b));
+
+set((state) => ({
+  tree: refreshedDirs.reduce(
+    (tree, dir) => replaceChildrenKeepingLoadedSubtrees(tree, dir.path, dir.children),
+    state.tree
+  ),
+}));
+```
+
+**Prevention**: For file-tree move/copy/rename/delete flows, check whether the refreshed path can be root or an ancestor of an expanded folder. If yes, avoid intermediate `set()` calls that temporarily drop descendant children.
+
+### Common Mistake: Treating an empty disclosure set as invalid
+
+**Symptom**: Clicking the last expanded item in a timeline immediately opens it again, or expanding one item closes another.
+
+**Cause**: The UI models an accordion with one nullable ID and treats `null` as a synchronization error whenever data exists. An empty set is a valid user choice, and independent disclosures cannot be represented by one ID.
+
+**Fix**: For AI Replay timeline turns, keep the expanded IDs in a `Set<string>`. Toggle only the clicked ID, preserve the set across live model updates, and intersect it with the current turn IDs to remove stale entries. Seed the first turn only during the initial data population; never use an empty set as a reason to auto-open a turn later.
+
+**Tests Required**:
+
+- Verify one expanded turn can be collapsed, all turns can remain collapsed, and any turn can be reopened.
+- Verify multiple turns stay expanded independently while replay data updates.
+- Verify session remounts and model replacement remove IDs for turns that no longer exist without forcing a replacement turn open.

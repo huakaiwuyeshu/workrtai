@@ -1,0 +1,38 @@
+name: Question
+description: Ask a usage or configuration question.
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Ask one specific question.
+      placeholder: "How do I ...?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What are you trying to accomplish, and what have you tried?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Related area
+      options:
+        - Installation
+        - Terminal
+        - Projects
+        - History sessions
+        - AI Replay
+        - Settings
+        - Hooks
+        - Statistics
+        - Other
+    validations:
+      required: true

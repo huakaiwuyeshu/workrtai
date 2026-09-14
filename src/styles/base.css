@@ -1,0 +1,45 @@
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  font-family: var(--font-ui-sans);
+}
+
+button, input, select, textarea, optgroup {
+  font-family: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .ui-empty-state::before,
+  .ui-empty-state-icon,
+  .ui-stats-panel::before {
+    animation: none !important;
+    transform: none !important;
+  }
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-ui-sans);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+}
+
+code,
+pre,
+kbd,
+samp,
+.ui-mono,
+.font-mono {
+  font-family: var(--font-ui-mono);
+  font-variant-ligatures: contextual;
+}

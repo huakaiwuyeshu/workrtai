@@ -1,0 +1,110 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import ts from "typescript";
+
+const tempDir = mkdtempSync(join(tmpdir(), "cli-manager-desktop-pet-transport-"));
+// 退出时清理本测试生成的临时模块目录。
+process.on("exit", () => rmSync(tempDir, { recursive: true, force: true }));
+
+const source = readFileSync(new URL("../src/features/desktop-pet/lib/desktopPetTransport.ts", import.meta.url), "utf8");
+const output = ts.transpileModule(source, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2022,
+  },
+  fileName: "desktopPetTransport.ts",
+}).outputText;
+const outputPath = join(tempDir, "desktopPetTransport.mjs");
+writeFileSync(outputPath, output, "utf8");
+const transport = await import(pathToFileURL(outputPath).href);
+
+// 构造含任务与接管字段的桌宠传输快照。
+function snapshot(overrides = {}) {
+  return {
+    mood: "working",
+    sessionId: "session-1",
+    daemonOnly: false,
+    sessionTitle: "Task",
+    projectName: "Project",
+    runningCount: 1,
+    attentionCount: 0,
+    updatedAt: 1000,
+    targets: [{
+      sessionId: "session-1",
+      daemonOnly: false,
+      sessionTitle: "Task",
+      projectName: "Project",
+      status: "running",
+      active: true,
+      updatedAt: 1000,
+      handoffCandidate: true,
+      handoffEligible: false,
+      handoffRecoverable: true,
+      handoffReason: "missing_cli_session_id",
+      handedOff: false,
+      handoffPhase: null,
+    }],
+    handoff: null,
+    handoffPlatforms: [],
+    handoffBusy: false,
+    ...overrides,
+  };
+}
+
+// 验证运行输出时间变化不单独触发新快照投递。
+test("running output timestamps do not trigger a new desktop pet delivery", () => {
+  const first = snapshot();
+  const next = snapshot({
+    updatedAt: 2000,
+    targets: [{ ...first.targets[0], updatedAt: 2000 }],
+  });
+  assert.equal(
+    transport.desktopPetSnapshotFingerprint(first),
+    transport.desktopPetSnapshotFingerprint(next),
+  );
+});
+
+// 验证可见任务状态变化仍改变快照指纹。
+test("visible desktop pet state changes still trigger delivery", () => {
+  const first = snapshot();
+  const next = snapshot({
+    mood: "waiting",
+    attentionCount: 1,
+    targets: [{ ...first.targets[0], status: "attention" }],
+  });
+  assert.notEqual(
+    transport.desktopPetSnapshotFingerprint(first),
+    transport.desktopPetSnapshotFingerprint(next),
+  );
+});
+
+// 验证成功时间参与指纹以保留成功提示超时语义。
+test("success timestamps remain meaningful for the success timeout", () => {
+  const first = snapshot({ mood: "success", updatedAt: 1000 });
+  const next = snapshot({ mood: "success", updatedAt: 2000 });
+  assert.notEqual(
+    transport.desktopPetSnapshotFingerprint(first),
+    transport.desktopPetSnapshotFingerprint(next),
+  );
+});
+
+// 验证后台 daemon 轮询识别内容相同的任务数组。
+test("background daemon polling reuses unchanged task arrays", () => {
+  const tasks = [{
+    sessionId: "session-1",
+    cwd: "/work",
+    alive: true,
+    taskStatus: "running",
+    taskUpdatedAtMs: 1000,
+    createdAtMs: 500,
+  }];
+  assert.equal(transport.sameBackgroundPetTasks(tasks, structuredClone(tasks)), true);
+  assert.equal(
+    transport.sameBackgroundPetTasks(tasks, [{ ...tasks[0], taskStatus: "done" }]),
+    false,
+  );
+});

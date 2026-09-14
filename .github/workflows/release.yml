@@ -1,0 +1,411 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "V*"
+
+env:
+  R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL || secrets.R2_PUBLIC_BASE_URL }}
+
+jobs:
+  ssh-agent:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Configure R2 release
+        run: node .github/scripts/r2-release-config.mjs export-actions-env
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+
+      - name: Install dependencies
+        run: |
+          cargo install cargo-zigbuild --locked
+          npm ci
+
+      - name: Test R2 release preparation
+        run: |
+          node .github/scripts/r2-release-config.test.mjs
+          node .github/scripts/prepare-r2-release.test.mjs
+
+      - name: Extract SSH Agent version
+        id: agent_version
+        shell: bash
+        run: |
+          VERSION="$(cargo metadata --no-deps --format-version 1 --manifest-path src-tauri/ssh-agent/Cargo.toml | node -e 'let input=""; process.stdin.on("data", chunk => input += chunk).on("end", () => { const pkg = JSON.parse(input).packages.find(item => item.name === "cli-manager-ssh-agent"); if (!pkg) process.exit(1); process.stdout.write(pkg.version); });')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Test SSH Agent
+        run: |
+          cargo test --manifest-path src-tauri/ssh-agent/Cargo.toml
+          sh .github/scripts/test-install-ssh-agent.sh
+
+      - name: Build Linux SSH Agent artifacts
+        run: |
+          cargo zigbuild --release --manifest-path src-tauri/ssh-agent/Cargo.toml --target x86_64-unknown-linux-gnu.2.17
+          cargo zigbuild --release --manifest-path src-tauri/ssh-agent/Cargo.toml --target aarch64-unknown-linux-gnu.2.17
+
+      - name: Verify SSH Agent GLIBC baseline
+        shell: bash
+        run: |
+          for binary in \
+            src-tauri/ssh-agent/target/x86_64-unknown-linux-gnu/release/cli-manager-ssh-agent \
+            src-tauri/ssh-agent/target/aarch64-unknown-linux-gnu/release/cli-manager-ssh-agent
+          do
+            MAX_GLIBC="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' | sed 's/^GLIBC_//' | sort -Vu | tail -1)"
+            test -n "$MAX_GLIBC"
+            test "$(printf '%s\n' 2.17 "$MAX_GLIBC" | sort -V | tail -1)" = "2.17" || {
+              echo "$binary requires GLIBC_$MAX_GLIBC; maximum supported version is GLIBC_2.17" >&2
+              exit 1
+            }
+          done
+
+      - name: Build signed release manifest
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node .github/scripts/build-ssh-agent-release.mjs \
+            "${{ steps.agent_version.outputs.version }}" \
+            "${{ github.ref_name }}" \
+            dist/ssh-agent \
+            src-tauri/ssh-agent/target/x86_64-unknown-linux-gnu/release/cli-manager-ssh-agent \
+            src-tauri/ssh-agent/target/aarch64-unknown-linux-gnu/release/cli-manager-ssh-agent
+          npx tauri signer sign dist/ssh-agent/ssh-agent-release-manifest.json
+          node .github/scripts/r2-release-config.mjs render-installer \
+            scripts/install-ssh-agent.sh \
+            dist/ssh-agent/install-ssh-agent.sh
+          sh -n dist/ssh-agent/install-ssh-agent.sh
+          grep -Fqx "R2_PUBLIC_BASE_URL=\"$R2_PUBLIC_BASE_URL\"" dist/ssh-agent/install-ssh-agent.sh
+
+      - name: Stage SSH Agent bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-agent-release
+          path: dist/ssh-agent/*
+          if-no-files-found: error
+
+  build:
+    needs: ssh-agent
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+            rust-target: ""
+          - platform: macos-14
+            args: "--target aarch64-apple-darwin"
+            rust-target: aarch64-apple-darwin
+          - platform: ubuntu-22.04
+            args: ""
+            rust-target: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Configure R2 release
+        run: node .github/scripts/r2-release-config.mjs export-actions-env
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test Codex app-server proxy
+        if: matrix.platform == 'windows-latest'
+        run: npm run test:codex-proxy:e2e
+
+      - name: Test Tauri dev proxy preparation
+        if: matrix.platform == 'windows-latest'
+        run: npm run test:tauri-dev-proxy
+
+      - name: Download bundled SSH Agent
+        uses: actions/download-artifact@v4
+        with:
+          name: ssh-agent-release
+          path: src-tauri/resources/ssh-agent
+
+      - name: Verify bundled SSH Agent files
+        shell: bash
+        run: |
+          for required in \
+            cli-manager-ssh-agent-linux-x86_64 \
+            cli-manager-ssh-agent-linux-aarch64 \
+            ssh-agent-release-manifest.json \
+            ssh-agent-release-manifest.json.sig
+          do
+            test -f "src-tauri/resources/ssh-agent/$required" || exit 1
+          done
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/V}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Extract changelog
+        id: changelog
+        shell: bash
+        run: |
+          CHANGELOG=$(node .github/scripts/extract-changelog.js "${{ steps.version.outputs.version }}" || echo "")
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="详见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md)"
+          fi
+          echo "content<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build and Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # 提高前端构建（tsc && vite build）的 Node 堆上限，避免 macOS runner 上 OOM（退出码 134/SIGABRT）
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        with:
+          tagName: "V__VERSION__"
+          releaseName: "CLI-Manager V__VERSION__"
+          releaseBody: |
+            ## 安装
+
+            | 平台 | 格式 |
+            |------|------|
+            | Windows | `.msi` 安装包 |
+            | Windows x64 便携版 | `.zip` 压缩包 |
+            | macOS (Apple Silicon) | `.dmg` 磁盘映像 |
+            | Linux | `.deb` / `.AppImage` |
+
+            > - Windows 首次安装可能触发 SmartScreen 提示，点击"仍要运行"继续
+            > - macOS 应用未经 Apple 签名/公证，首次打开可能提示"已损坏"或"无法验证开发者"
+
+            Windows 便携版：下载 `Windows x64 portable .zip`，解压后直接运行 `cli-manager.exe`，无需安装。
+
+            ### macOS 安装说明
+
+            如果已拖入"应用程序"目录，执行：
+
+            ```bash
+            xattr -cr /Applications/CLI-Manager.app
+            open /Applications/CLI-Manager.app
+            ```
+
+            也可以在 Finder 中右键应用图标，选择"打开"，或在"系统设置 → 隐私与安全性"中点击"仍要打开"。
+
+            ## 变更日志
+
+            ${{ steps.changelog.outputs.content }}
+          # Keep the release out of `releases/latest` until the required SSH Agent assets exist.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+      - name: Package Windows portable ZIP
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: .\scripts\package-portable.ps1 -Version "${{ steps.version.outputs.version }}" -OutputDir "dist/portable"
+
+      - name: Upload Windows portable artifact
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-release
+          path: dist/portable/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [build, ssh-agent]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Configure R2 release
+        run: node .github/scripts/r2-release-config.mjs export-actions-env
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download SSH Agent release files
+        uses: actions/download-artifact@v4
+        with:
+          name: ssh-agent-release
+          path: dist/ssh-agent
+
+      - name: Download Windows portable release
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-portable-release
+          path: dist/portable
+
+      - name: Upload SSH Agent release files
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
+            dist/ssh-agent/cli-manager-ssh-agent-linux-x86_64
+            dist/ssh-agent/cli-manager-ssh-agent-linux-aarch64
+            dist/ssh-agent/ssh-agent-release-manifest.json
+            dist/ssh-agent/ssh-agent-release-manifest.json.sig
+            dist/ssh-agent/install-ssh-agent.sh
+            dist/portable/*.zip
+
+      - name: Verify GitHub release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          assets=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name')
+          for required in \
+            cli-manager-ssh-agent-linux-x86_64 \
+            cli-manager-ssh-agent-linux-aarch64 \
+            ssh-agent-release-manifest.json \
+            ssh-agent-release-manifest.json.sig \
+            install-ssh-agent.sh \
+            "CLI-Manager-V${GITHUB_REF_NAME#V}-Windows-x64-portable.zip"
+          do
+            printf '%s\n' "$assets" | grep -Fxq "$required" || {
+              echo "Missing required SSH Agent release asset: $required" >&2
+              exit 1
+            }
+          done
+
+      - name: Prepare R2 release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          rm -rf dist/github-release dist/r2-release
+          mkdir -p dist/github-release
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir dist/github-release \
+            --clobber
+          test -f dist/github-release/latest.json
+          test -f dist/github-release/ssh-agent-release-manifest.json
+          node .github/scripts/prepare-r2-release.mjs \
+            dist/github-release \
+            dist/r2-release \
+            "$R2_PUBLIC_BASE_URL" \
+            "$GITHUB_REF_NAME"
+          rm -f dist/r2-release/ssh-agent-release-manifest.json.sig
+          npx tauri signer sign dist/r2-release/ssh-agent-release-manifest.json
+
+      - name: Upload release assets to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET || secrets.R2_BUCKET }}
+        shell: bash
+        run: |
+          test -n "$R2_ACCOUNT_ID"
+          test -n "$R2_BUCKET"
+          R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          VERSION_PREFIX="CLI-Manager/releases/${GITHUB_REF_NAME}"
+          aws s3 cp dist/r2-release "s3://${R2_BUCKET}/${VERSION_PREFIX}/" \
+            --recursive \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp dist/r2-release/latest.json \
+            "s3://${R2_BUCKET}/CLI-Manager/releases/latest/latest.json" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type "application/json" \
+            --cache-control "no-cache"
+          for agent_file in \
+            cli-manager-ssh-agent-linux-x86_64 \
+            cli-manager-ssh-agent-linux-aarch64 \
+            ssh-agent-release-manifest.json \
+            ssh-agent-release-manifest.json.sig \
+            install-ssh-agent.sh
+          do
+            aws s3 cp "dist/r2-release/${agent_file}" \
+              "s3://${R2_BUCKET}/CLI-Manager/releases/ssh-agent/latest/${agent_file}" \
+              --endpoint-url "$R2_ENDPOINT" \
+              --cache-control "no-cache"
+          done
+
+      - name: Verify R2 assets and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --retry 5 --retry-all-errors \
+            "$R2_PUBLIC_BASE_URL/CLI-Manager/releases/latest/latest.json" \
+            --output /tmp/r2-latest.json
+          curl --fail --silent --show-error --retry 5 --retry-all-errors \
+            "$R2_PUBLIC_BASE_URL/CLI-Manager/releases/ssh-agent/latest/ssh-agent-release-manifest.json" \
+            --output /tmp/r2-agent-manifest.json
+          node - "$R2_PUBLIC_BASE_URL" <<'NODE'
+          const fs = require("node:fs");
+          const base = process.argv[2];
+          const latest = JSON.parse(fs.readFileSync("/tmp/r2-latest.json", "utf8"));
+          const agent = JSON.parse(fs.readFileSync("/tmp/r2-agent-manifest.json", "utf8"));
+          const urls = [
+            ...Object.values(latest.platforms ?? {}).map((entry) => entry.url),
+            ...(agent.artifacts ?? []).map((entry) => entry.url),
+          ];
+          if (urls.length === 0 || urls.some((url) => typeof url !== "string" || !url.startsWith(`${base}/`))) {
+            throw new Error("R2 manifests contain a non-R2 asset URL");
+          }
+          fs.writeFileSync("/tmp/r2-asset-urls.txt", `${urls.join("\n")}\n`);
+          NODE
+          while IFS= read -r asset_url
+          do
+            curl --fail --silent --show-error --location --head --retry 5 --retry-all-errors "$asset_url"
+          done < /tmp/r2-asset-urls.txt
+          for stable_asset in \
+            ssh-agent-release-manifest.json.sig \
+            install-ssh-agent.sh
+          do
+            curl --fail --silent --show-error --location --head --retry 5 --retry-all-errors \
+              "$R2_PUBLIC_BASE_URL/CLI-Manager/releases/ssh-agent/latest/$stable_asset"
+          done
+          gh release edit "${GITHUB_REF_NAME}" --draft=false --latest

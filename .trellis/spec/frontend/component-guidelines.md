@@ -1,0 +1,2276 @@
+# Component Guidelines
+
+## Convention: Terminal output uses PtyHost binary frames and xterm parse ACK
+
+**What**: `XTermTerminal` receives PTY data only through `TerminalProcessManager` / `PtyHostSocket`. Hidden terminals remain attached and parse output. ACK is sent from the `terminal.write` callback, never when the WebSocket message arrives.
+
+**Why**: This keeps process transport out of components, prevents hidden-tab replay corruption, and makes daemon backpressure represent xterm parser progress instead of network delivery.
+
+**Contracts**:
+
+- Output/replay frames carry `sessionId`, `sequence`, `cols`, `rows`, and raw bytes.
+- Initial and reconnect Replay apply recorded dimensions before each frame while PTY resize forwarding is suspended. The final Replay frame is an explicit client-side batch boundary; force-fit the current container before releasing queued live output or resuming normal resize forwarding.
+- `TerminalProcessManager` owns every received frame until xterm's write callback commits it. Component cleanup must only detach the consumer; it must not discard or persist-and-duplicate uncommitted frames.
+- Live frames may be combined for one xterm write, but completion commits and ACKs the constituent frames in sequence order using each frame's raw UTF-16 length.
+- A remounted Display receives all uncommitted frames again. Commit callbacks from an older attachment generation are ignored.
+- When a layout/workspan migration remounts a Display, its layout-effect cleanup must serialize the xterm buffer; the new Display restores that snapshot and completes its first fit/refresh before subscribing to PTY output. Do not arm the new Display's unmount snapshot callback until that restore completes: React StrictMode may dispose the probe mount while its initial write is still pending, and serializing that empty probe would overwrite the valid source snapshot. Committed frames are not replayed by the manager, so subscribing before restore can leave an idle shell visually blank.
+- Closing the last attached session cancels any scheduled reconnect; a delayed reconnect callback must return without opening a socket when no non-tombstoned sessions remain.
+- No component or store may call `listen("pty-output-...")` or invoke `pty_write/pty_resize/pty_close` directly.
+- Large-buffer horizontal resize uses a leading + trailing latest-wins cadence capped at 34ms; vertical resize remains immediate. Consecutive `ResizeObserver` frames replace only the pending fit RAF and must not cancel that horizontal cadence. macOS/Linux enable xterm cursor-line reflow so a rapid shrink does not expose the old-width cursor row while waiting for the PTY application's `SIGWINCH` redraw; Windows keeps the existing ConPTY compatibility policy. Shrink and grow must both expose xterm's live resize as soon as its queued render is ready. Immediately before each visible horizontal shrink, keep a pixel copy of the last stable `.xterm-screen` above the hidden live screen, but display that copy at its original CSS size inside an overflow-clipped viewport; never stretch the bitmap or hold it for the whole drag. Reveal the live renderer after two animation frames, and restart only this two-frame guard if another `Terminal.resize()` arrives first. `ResizeObserver` events that occur while waiting for the next throttled terminal resize may update the clip bounds but must not delay the reveal. WebGL must preserve its drawing buffer for this copy, and the barrier must validate that a captured frame contains visible pixels before hiding the live screen; a failed/empty capture leaves the live renderer visible. Capture geometry and visibility belong to `.xterm-screen`; root-level canvas lookup is only a compatibility fallback and must exclude the overview ruler. This barrier starts immediately before `Terminal.resize()`, never during the throttle wait, so it hides only xterm/WebGL's corrupt intermediate reflow frame without freezing the whole drag. Before a normal-buffer column change, if the user is above the live bottom, register a temporary marker at `viewportY`; after `Terminal.resize()` wait two animation frames for xterm's queued render and DOM viewport synchronization, then scroll to the marker's updated line and dispose it. A synchronous `scrollToLine()` is forbidden because the old DOM scroll height clamps the target before xterm's queued viewport sync. If the normal buffer was at live bottom before the column change, call `scrollToBottom()` immediately after resize and again after the same two-frame DOM synchronization window so xterm's live-follow intent cannot remain stale. Cancel and dispose any pending viewport restore on a newer resize, output-state reset, or terminal detach. Do not force alternate-buffer terminals. Visibility restore fits immediately and forces a full refresh only when natural rendering does not complete within two frames or the renderer was rebuilt.
+- Split-pane leaf and divider bounds must align to the current display's physical pixel grid using the split root's global origin and `window.devicePixelRatio`. Arbitrary persisted/drag-preview ratios, fractional container bounds, nested splits, and fullscreen leaves must not place an xterm canvas at a fractional device-pixel origin. Snap divider start/end boundaries and derive the second pane from the remaining aligned space so the layout has no gap or overlap. Refresh the grid metrics on container resize and window changes, and use a resolution media query that rebinds itself whenever DPR changes so moving an unchanged-size window among 1080p, 2K fractional-scaling (including DPR 1.25/1.5), and Retina displays cannot retain the previous screen's pixel grid.
+
+**Remount snapshot ordering**:
+
+```tsx
+// Wrong: a StrictMode probe can serialize an empty terminal before restore finishes.
+snapshotBeforeUnmountRef.current = serializeCurrentBuffer;
+terminal.write(initialTerminalOutput, finishInitialDisplayRestore);
+
+// Correct: the valid source snapshot remains untouched until the new display is ready.
+terminal.write(initialTerminalOutput, () => {
+  scheduleFit(true);
+  requestAnimationFrame(() => {
+    snapshotBeforeUnmountRef.current = serializeCurrentBuffer;
+    markInitialDisplayReady();
+  });
+});
+```
+
+**Wrong**:
+
+```tsx
+listen(`pty-output-${sessionId}`, ({ payload }) => terminal.write(atob(payload)));
+```
+
+**Correct**:
+
+```tsx
+terminalProcessManager.subscribeOutput(sessionId, (delivery) => {
+  terminal.write(decode(delivery.frame.data), () => {
+    delivery.commit(rawLength);
+  });
+});
+```
+
+**Tests**: Run `npx tsc --noEmit` and `node --test scripts/ptyHostSocket.test.mjs scripts/terminalProcessManager.test.mjs scripts/terminalReplay.test.mjs scripts/terminalResizeDebouncer.test.mjs scripts/terminalResizeRenderBarrier.test.mjs scripts/terminalSplitLayout.test.mjs scripts/terminalReflowPolicy.test.mjs`; manually verify background output, reconnect replay, rapid split/fullscreen shrink, equal text sharpness across adjacent panes, transparent terminal backgrounds, IME, WebGL fallback, and no duplicate output after daemon reconnect.
+
+## Convention: Terminal scroll-to-bottom affordances use xterm Buffer state
+
+**What**: A terminal-local jump-to-bottom control derives its visibility from the active xterm Buffer, not from browser scrollbar geometry. Show it only when `buffer.type === "normal" && buffer.viewportY < buffer.baseY`.
+
+**Why**: xterm's Buffer is the source of truth for normal scrollback, alternate-screen state, reflow, and programmatic scrolling. Reading `.xterm-viewport.scrollTop` can miss xterm state changes and can couple UI behavior to WebView scrollbar implementation details.
+
+**Contracts**:
+
+- Keep the state in the `XTermTerminal` instance so hidden, split, and Workspan sessions do not share scroll position UI.
+- Recompute after `onScroll`, `onWriteParsed`, `onResize`, and `onRender`; retain any existing event behavior in those handlers.
+- Clicking the control calls the current terminal's public `scrollToBottom()` API and sends no PTY input.
+- Do not show the control for the alternate buffer or for a normal buffer already at `viewportY === baseY`.
+- If another terminal control occupies the same corner, compose both controls in one positioned vertical group instead of stacking independent absolute elements.
+- The persisted `keyboardShortcuts.scrollToBottom`, `keyboardShortcuts.pageUp`, and `keyboardShortcuts.pageDown` bindings are handled by the xterm custom key handler only while `buffer.active.type === "normal"`; `scrollToBottom()` and `scrollPages(±1)` must not be sent to or replace input for an alternate-screen TUI.
+
+**Correct**:
+
+```tsx
+const buffer = terminal.buffer.active;
+const showScrollToBottom = buffer.type === "normal" && buffer.viewportY < buffer.baseY;
+```
+
+**Wrong**:
+
+```tsx
+const showScrollToBottom = terminal.element?.querySelector(".xterm-viewport")?.scrollTop !== 0;
+```
+
+**Tests**: Assert the normal-buffer predicate, all four xterm event subscriptions, public `scrollToBottom()` use, and no PTY write in the control handler. Manually verify normal scrollback, alternate-buffer TUI, output, scrollbar/keyboard scrolling, reflow, split panes, hidden sessions, and coexistence with other bottom-corner controls.
+
+### Convention: Terminal CLI-specific input uses immutable metadata plus bounded runtime detection
+
+**What**: Input behavior that differs by CLI must first use the `TerminalSession.cliTool` captured when the Agent terminal was created, then compatible project/title/startup metadata. A plain Shell that manually starts a CLI may use exact submitted-command evidence plus a current viewport TUI signature as a bounded runtime fallback.
+
+The host Enter handler routes through `resolveTerminalNewlineKeyEvent(event, { shortcut, usesEscCrComposerNewline })`, which returns `write` with either `ESC + CR` or `LF`, `swallow` for unmatched host-managed combinations, and `pass` for a native `Alt + Enter` owned by a confirmed Grok/Codex session.
+
+**Why**: Project records, Tab titles, and startup commands are not a complete runtime identity. A locally created terminal may intentionally omit `projectId`, and users may start Codex manually. Persisting a guessed runtime CLI back into the session is also unsafe because the process can exit back to the Shell.
+
+```typescript
+// Wrong: misses immutable session identity and manually launched CLIs.
+const codex = project.cli_tool === "codex" || CODEX_COMMAND_PATTERN.test(session.startupCmd);
+
+// Correct: stable metadata first; manual evidence is component-local and limited to the current viewport.
+const multilineInput = isCodexTerminalContext(context)
+  || isGrokTerminalContext(context)
+  || hasCodexTuiViewport(terminal)
+  ? "\x1b\r"
+  : "\n";
+```
+
+**Contracts**:
+
+- Configured shortcut matching remains authoritative; runtime detection chooses only the PTY byte sequence.
+- Codex and Grok Build multiline input use `ESC + CR`; ordinary Shell and Claude input keep their existing sequence.
+- When Grok Build or Codex is active, an unmatched native `Alt+Enter` is passed through to xterm so the CLI can emit its own `ESC + CR`; unmatched Shift/Ctrl+Enter remain swallowed by the host shortcut policy.
+- Runtime detection must inspect only the current viewport; off-viewport scrollback is historical evidence and must never establish current CLI identity.
+- A plain Shell may establish a manual CLI fallback only after an exact launch command was submitted through the input buffer and the current viewport still contains the CLI's TUI composer prompt. The fallback is component-local, is cleared when that prompt disappears or the terminal detaches, and is never persisted as `TerminalSession.cliTool`.
+- Do not assume Codex uses the alternate buffer. Normal/alternate behavior depends on CLI version, launch arguments, and user configuration.
+- Project-managed Codex and Grok Build sessions should still prefer `TerminalSession.cliTool` or other immutable startup metadata over viewport text.
+- Do not introduce foreground-process IPC solely to infer this input behavior unless local, WSL, and SSH process ownership contracts are designed together.
+
+**Good/Base/Bad Cases**:
+
+- Good: a project Agent terminal remains identifiable after project metadata changes because its session captured `cliTool`.
+- Base: a normal Shell uses normal newline behavior; manually running `codex` in either normal or alternate buffer enables Codex newline encoding without requiring Hook installation, while Grok Build uses the same encoding when stable session metadata identifies it.
+- Good: once Codex TUI signatures leave the current viewport, runtime fallback stops matching.
+- Good: a plain Shell that submits the exact `grok` executable command receives the Grok fallback only while its current viewport still shows the TUI composer prompt; returning to the Shell clears the fallback.
+- Bad: requiring `buffer.type === "alternate"`; `--no-alt-screen` and user configuration make legitimate Codex sessions stay in the normal buffer.
+- Bad: classifying `echo grok`, `grok-helper`, or arbitrary scrollback text as a running Grok session.
+- Bad: permanently setting `session.cliTool = "codex"` from viewport text or one Hook event without an authoritative exit transition.
+
+**Tests Required**:
+
+- Assert project-session detection reads `TerminalSession.cliTool` and recognizes Grok Build stable metadata.
+- Assert visible normal- and alternate-buffer `OpenAI Codex` and `/model to change` signatures are recognized.
+- Assert ordinary Shell, Claude, and off-viewport Codex text are rejected.
+- Assert an exact manually submitted `grok` command can enable the component-local fallback only with a visible TUI composer prompt, and that `echo grok` / `grok-helper` plus a returned Shell prompt are rejected.
+- Run `node --test scripts/terminalNewlineShortcut.test.mjs` and `npx tsc --noEmit`.
+
+### Convention: OSC color-query normalization has no frontend PTY side effects
+
+**What**: Rust PTY owns live OSC 10/11 replies. Frontend normalization only removes residual queries from live, replay, and restored display text; it must not import the process manager or write a reply.
+
+**Why**: A WebView → daemon → PTY round trip can exceed a CLI's short terminal-probe window. The late response is then parsed as user input. Replay is historical output and must also remain side-effect free.
+
+**Correct**:
+
+```ts
+const text = normalizeTerminalOutput(rawText);
+```
+
+**Wrong**:
+
+```ts
+terminalProcessManager.write(sessionId, colorReply);
+```
+
+**Contracts**: See [Terminal OSC Color Contracts](../backend/terminal-osc-color-contracts.md) for protocol, validation, local/WSL/SSH behavior, and required tests.
+
+**Tests**: Run `node --test scripts/terminalOsc.test.mjs`; assert both live and replay queries are filtered and `useTerminalOsc.ts` contains no `terminalProcessManager.write` or `replyToColorQueries` path.
+
+## Component Structure
+
+### Convention: User-facing app shell text goes through `useI18n`
+
+**What**: New or changed user-facing labels, button text, menu text, aria labels, tooltips, settings titles, empty states, toast messages, OS notifications, stats/history text, and hook-notification script text must use `src/shared/i18n/index.ts` through `useI18n()` or `translateCurrent()` instead of hard-coded Chinese/English strings. Persisted language preference lives in `settingsStore.language` as `"auto" | "zh-CN" | "zh-TW" | "en-US"`.
+
+**Why**: Language switching must be consistent across visible shell UI. Keeping translation keys in one local module avoids adding a heavyweight i18n dependency while the app supports Simplified Chinese, Traditional Chinese, and English.
+
+**Correct**:
+
+```tsx
+import { useI18n } from "../lib/i18n";
+
+const { t } = useI18n();
+
+<button aria-label={t("sidebar.openSettings")}>{t("sidebar.settings")}</button>
+```
+
+**Wrong**:
+
+```tsx
+<button aria-label="打开设置">设置</button>
+```
+
+**Contracts**:
+
+- Use `language: "auto"` as the default; resolve it from WebView/browser locale.
+- Set document language from the resolved language in `App`.
+- Add both `zh-CN` and `en-US` entries for every new translation key; `zh-TW` is generated from `zh-CN` unless a task explicitly needs a Traditional Chinese override.
+- Treat i18n as part of every frontend requirement, not as a later cleanup. If a task adds UI, tooltip, notification, history, stats, settings, or hook-facing copy, the task is incomplete until all supported languages work, including `zh-TW`.
+- For non-React event paths, background callbacks, and hook notification handlers, use `translateCurrent()` so messages still follow the persisted language outside render scope.
+- When inline code needs to choose between Chinese and English copy, route it through `pickByLanguage()` so `zh-TW` resolves to converted Traditional Chinese instead of falling back to Simplified Chinese or English.
+- Keep clock-only times in 24-hour format by passing `hour12: false` when formatting with `toLocaleTimeString`; switching to English must not turn `15:31` into `03:31`.
+- Do not introduce a third-party i18n library without an explicit dependency-change decision.
+
+**Tests**: Run `npx tsc --noEmit` and `npm run build`; manually verify Settings > General language switching changes the touched UI and persists after restart across `zh-CN`, `zh-TW`, and `en-US`. Smoke-test hover cards/tooltips, right-side action buttons, session history, stats panels, toast/system notifications, and hook notifications when those areas are touched.
+
+### Convention: Text input and confirmation prompts use themed application dialogs
+
+**What**: User-facing flows that request text input or confirmation must use themed application dialogs such as `useAppPrompt` and `useAppConfirm`. Do not call `window.prompt` or `window.confirm` anywhere in frontend code.
+
+**Why**: WebView prompt styling and behavior vary by platform, do not follow the application theme, and create an inconsistent desktop experience.
+
+**Correct**:
+
+```tsx
+const { prompt, promptDialog } = useAppPrompt();
+const name = await prompt({ title: t("settings.statuslineProfiles.createPrompt") });
+
+const { confirm, confirmDialog } = useAppConfirm();
+const confirmed = await confirm({ title: t("sidebar.toast.unsavedFileConfirm"), danger: true });
+
+return <>{promptDialog}{confirmDialog}</>;
+```
+
+**Wrong**:
+
+```tsx
+const name = window.prompt("Enter a name");
+const confirmed = window.confirm("Discard changes?");
+```
+
+**Contracts**:
+
+- Dialog text must use the existing i18n system.
+- Cancel resolves without performing the operation.
+- Name-like values are trimmed and empty values cannot be submitted by default. Use an explicit `allowEmpty` option only when blank input has a defined action such as clearing an optional custom name.
+- Confirmation dialogs resolve to `true` only after explicit confirmation; cancel, Escape, close, replacement, or component unmount resolve to `false`.
+- Sequential workflows such as import conflict resolution must stop without committing when the user cancels.
+
+**Tests**: Run `rg "window\\.(prompt|confirm)" src` and expect no matches; run `npx tsc --noEmit`; manually verify submit, confirm, Enter, Escape, cancel, default values, empty input, danger styling, and both supported languages.
+
+### Convention: Persisted font family values must be CSS-serialized before applying
+
+**What**: Any UI or terminal font family value loaded from settings or system font discovery must be normalized through `normalizeFontFamilyStack` or `normalizeTerminalFontFamily` before it is written into inline styles, CSS variables, generated `<style>` text, Mantine theme config, or xterm options.
+
+**Why**: System font names can contain spaces, commas, CJK characters, punctuation, or other characters that need CSS string serialization. If a raw persisted value or raw system-font option is injected directly, CSS can parse it differently from the intended family and some settings surfaces can keep rendering with the fallback font. For terminal fonts, generic fallbacks such as `monospace` must stay after the selected concrete family; otherwise xterm resolves the generic font first and the user's selected system/custom terminal font never appears.
+
+**Option matching contract**: Normalize the persisted current value, built-in options, and system options with the same context-specific normalizer. Terminal selectors pass `normalizeTerminalFontFamily` to `mergeFontFamilyOptions`; UI selectors keep the default `normalizeFontFamilyStack`. Serialize a discovered system font as one CSS family before appending fallbacks so a comma inside the family name is not treated as a stack separator.
+
+**Correct**:
+
+```tsx
+const effectiveUiFontFamily = normalizeFontFamilyStack(uiFontFamily);
+
+document.documentElement.style.setProperty("--font-ui-sans", effectiveUiFontFamily);
+styleEl.textContent = `button { font-family: ${effectiveUiFontFamily} !important; }`;
+
+const effectiveTerminalFontFamily = normalizeTerminalFontFamily(fontFamily);
+terminal.options.fontFamily = effectiveTerminalFontFamily;
+```
+
+**Wrong**:
+
+```tsx
+document.documentElement.style.setProperty("--font-ui-sans", uiFontFamily);
+styleEl.textContent = `button { font-family: ${uiFontFamily} !important; }`;
+terminal.options.fontFamily = fontFamily;
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually select installed system/custom fonts with different name shapes, such as a space-containing font, a CJK-named font, a comma-containing font, and a punctuation-containing font when available. In Settings > General and Settings > Terminal, verify the settings navigation/content and a newly focused terminal use the selected font, and the terminal select does not show the current-custom fallback label for available system fonts.
+
+### Convention: Auxiliary panels do not hijack primary sidebar navigation
+
+**What**: Terminal-side auxiliary panels, such as realtime stats, Git changes, and project files, must not force the primary left sidebar into a different navigation mode. If an auxiliary panel needs to load shared data, keep the left sidebar display mode behind explicit local UI state or a dedicated left-sidebar action.
+
+**Why**: The left sidebar is the user's project navigation anchor. Opening a right-side Files panel may need file explorer data, but it should not replace the project tree or remove the user's path back to projects.
+
+**Correct**:
+
+```tsx
+const [showFileExplorer, setShowFileExplorer] = useState(false);
+
+// Left sidebar project context menu explicitly enters file mode.
+const handleOpenProjectFiles = async (project: Project) => {
+  await openFileProject(project);
+  setShowFileExplorer(true);
+};
+
+{showFileExplorer && fileProject ? (
+  <FileExplorerSidebar onBackToProjects={() => setShowFileExplorer(false)} />
+) : (
+  <ProjectTree />
+)}
+```
+
+**Wrong**:
+
+```tsx
+// Any feature that writes fileProject would unexpectedly replace the project tree.
+{fileProject ? <FileExplorerSidebar /> : <ProjectTree />}
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually verify opening the right Files panel leaves the left project tree visible, while the left context-menu Browse Files action still opens a file tree with a working return button.
+
+### Convention: Internal terminal file drops preserve the source file panel context
+
+**What**: A file dragged from the file panel into any terminal uses a one-shot suppression marker while the target terminal receives focus. `TerminalTabs` must consume that marker before synchronizing the shared file explorer project, so the source project's selected directory remains visible after a cross-project drop.
+
+**Why**: Focusing a split terminal normally changes the active session and would otherwise replace the shared file panel project before the user can continue selecting files from the source directory.
+
+**Contracts**:
+
+- The suppression marker is set only after an internal file drag has resolved a terminal drop zone.
+- It is consumed once by `syncFilePanelProject`; ordinary terminal activation and explicit Files-panel navigation continue to synchronize normally.
+- Internal file-drag text appends one trailing space unless it already ends in whitespace; ordinary paste and system file drops keep their existing text behavior.
+
+**Tests**: Run `node --test scripts/fileExplorerPathActions.test.mjs` and `npx tsc --noEmit`; manually verify a file panel drag to another split project's terminal keeps the source project and directory, then verify the next explicit Files-panel switch still follows the selected terminal.
+
+### Convention: Terminal Tab CLI icons inherit Tab foreground color
+
+**What**: CLI-specific icons rendered inside terminal Tabs must receive `className="text-current"` so monochrome icons such as OpenCode and Pi follow the Tab's theme-aware foreground color.
+
+**Why**: The shared `CliToolIcon` default is suitable for normal application surfaces but can become low-contrast inside terminal chrome, whose foreground color is scoped by the active terminal theme.
+
+**Correct**:
+
+```tsx
+<CliToolIcon icon={cliToolIcon} size={14} className="text-current" />
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually verify OpenCode and Pi Tabs in dark, light, and split-pane terminal themes.
+
+### Convention: Optional-container Radix dialogs pick positioning by portal target
+
+**What**: A Radix `Dialog.Portal` that accepts an optional `container` must use container-relative `absolute inset-0` positioning only when a container is supplied. When the portal falls back to `document.body`, the overlay and content must use viewport-relative `fixed inset-0`.
+
+**Why**: `absolute inset-0` is correct inside a known `relative` panel such as the history detail pane. With the default body portal, the same classes can render only the overlay or place content in the wrong positioning context, which looks like a black screen.
+
+**Correct**:
+
+```tsx
+const portalContainer = container ?? undefined;
+const positionClass = container ? "absolute inset-0" : "fixed inset-0";
+
+<DialogPrimitive.Portal container={portalContainer}>
+  <DialogPrimitive.Overlay className={cn(positionClass, "bg-black/45")} />
+  <DialogPrimitive.Content className={cn(positionClass, "flex items-center justify-center")} />
+</DialogPrimitive.Portal>
+```
+
+**Wrong**:
+
+```tsx
+<DialogPrimitive.Portal container={container ?? undefined}>
+  <DialogPrimitive.Overlay className="absolute inset-0 bg-black/45" />
+  <DialogPrimitive.Content className="absolute inset-0" />
+</DialogPrimitive.Portal>
+```
+
+**Tests**: Run `npx tsc --noEmit` and `npm run build`; manually verify both a container-scoped caller and a default body-portal caller can open and close the dialog with visible content.
+
+### Convention: Hook-dependent fallback props use stable module constants
+
+**What**: If an optional array or object prop is used in a hook dependency list, do not default it to an inline literal in the function parameter list. Use a module-level constant instead.
+
+**Why**: Defaults such as `items = []` create a fresh array on every render. If an effect depends on that prop and calls `setState`, callers that omit the prop can trigger repeated effects and React's "Maximum update depth exceeded" error.
+
+**Correct**:
+
+```tsx
+const EMPTY_ITEMS: Item[] = [];
+
+function Panel({ items = EMPTY_ITEMS }: { items?: Item[] }) {
+  useEffect(() => {
+    setRows(buildRows(items));
+  }, [items]);
+}
+```
+
+**Wrong**:
+
+```tsx
+function Panel({ items = [] }: { items?: Item[] }) {
+  useEffect(() => {
+    setRows(buildRows(items));
+  }, [items]);
+}
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually verify a caller that omits the optional prop can open, close, and rerender the component without a React maximum-depth error.
+
+### Convention: Markdown rendering goes through the shared MarkdownContent component
+
+**What**: Any UI that renders user/session/release Markdown must use `src/shared/ui/MarkdownContent.tsx`. Do not import `react-markdown` directly from feature components.
+
+**Why**: Markdown content comes from history files, prompts, update notes, and tool transcripts. Keeping rendering in one component preserves the same GFM support, `skipHtml` safety policy, link behavior, image placeholder behavior, code highlighting, search highlighting, and GitHub-style visual treatment everywhere.
+
+**Correct**:
+
+```tsx
+import { MarkdownContent } from "../ui/MarkdownContent";
+
+<MarkdownContent content={message.content} query={sessionQuery} />
+<MarkdownContent content={releaseNotes} linkBehavior="open" />
+```
+
+**Wrong**:
+
+```tsx
+import ReactMarkdown from "react-markdown";
+
+<ReactMarkdown>{releaseNotes}</ReactMarkdown>
+```
+
+**Contracts**:
+
+- Keep `skipHtml` enabled for untrusted Markdown.
+- Default links to preview-only behavior unless the surrounding flow explicitly allows opening external URLs.
+- Keep remote images as placeholders by default; do not load remote images from history/session content without a separate reviewed allowlist or setting.
+- Math Markdown must be enabled in this shared renderer with `remark-math` and `rehype-katex`; keep `skipHtml` enabled, leave formulas inside fenced code blocks as literal code, and keep long display formulas horizontally scrollable.
+- Terminal-specific Markdown theming must stay opt-in. If one caller needs a light/dark-aware code theme or palette override, add an explicit prop or caller-owned class instead of changing the shared `variant="terminal"` default for every consumer.
+- Scope terminal-variant CSS overrides to the caller container (for example a transcript shell or file-preview wrapper). Do not widen `.ui-markdown-terminal` defaults just to fix one surface.
+- The terminal background image is owned by `.ui-terminal-bg-layer`; when `data-bg-enabled="true"`, the Markdown preview must reveal that same pseudo-element layer through a translucent surface instead of loading a second asset. Controls that are direct children of the wrapper need a z-index above the generic direct-child stacking rule.
+- Terminal Markdown preview may unwrap one top-level `md` / `markdown` fenced source block before passing it to the shared renderer; nested code fences remain literal code. The preview must source all non-empty assistant messages from the loaded `HistorySessionDetail` and provide a stable message selector instead of silently discarding earlier responses.
+- When changing Markdown styles, update `src/shared/ui/markdownSample.ts` so the manual preview covers the new element or edge case.
+
+**Tests**: Run `npx tsc --noEmit` and `npm run build`; manually inspect the Markdown style preview in Settings > About in both default and terminal variants. If the change targets a terminal-only caller such as a transcript or file preview, also verify that scoped caller still matches the active terminal theme while the other `variant="terminal"` callers keep their prior appearance.
+
+### Convention: Hidden terminal WebGL cleanup releases renderer only
+
+**What**: In `XTermTerminal`, low-memory cleanup and Linux constrained-graphics cleanup for hidden terminals may dispose only the `WebglAddon` after the configured hidden delay. It must not dispose the xterm `Terminal`, PTY listener, fit/search addons, scrollback buffer, active write queue, or input state.
+
+**Why**: The goal is to release WebView2 GPU resources while preserving the live terminal session. Disposing the terminal component itself would force replay/recreation, risk lost output/input, and can make tab switching feel like a terminal reload.
+
+**Correct**:
+
+```tsx
+if (!isVisible && lowMemoryMode) {
+  webglDisposeTimerRef.current = window.setTimeout(() => {
+    if (isVisibleRef.current) return;
+    webglAddonRef.current?.dispose();
+    webglAddonRef.current = null;
+    needsViewportRefreshRef.current = true;
+  }, 10_000);
+}
+```
+
+**Wrong**:
+
+```tsx
+// This kills the renderer and the terminal session UI state.
+terminal.dispose();
+terminalRef.current = null;
+```
+
+**Contracts**:
+
+- Clear the hidden-WebGL timer when the terminal becomes visible again and during component unmount.
+- Re-check `isVisibleRef.current` inside the timer callback before disposing.
+- Recreate WebGL only while visible and only when the existing theme/background conditions allow it (not transparent, not light theme, not an explicit Linux WebKit fallback mode, and no prior context loss in the current terminal instance).
+- After recreating WebGL, schedule a fit/viewport refresh so the existing xterm buffer repaints without reloading terminal history.
+- The initial terminal creation effect must not add `lowMemoryMode` as a dependency that recreates the whole terminal when the setting toggles.
+
+**Tests**: Run `npx tsc --noEmit`. Manually enable low memory mode, switch away from a terminal for more than 10 seconds, verify the session keeps running, then switch back and confirm the current viewport repaints without restarting the shell or losing scrollback.
+
+## Scenario: Terminal image addon WebAssembly compatibility
+
+### 1. Scope / Trigger
+
+- Applies whenever `@xterm/addon-image` is loaded in the Tauri WebView.
+- The addon creates WebAssembly decoders during activation, so CSP and addon loading are one compatibility boundary.
+
+### 2. Signatures
+
+- CSP: `app.security.csp` in `src-tauri/tauri.conf.json`.
+- Addon activation: `terminal.loadAddon(imageAddon)` in `XTermTerminal`.
+
+### 3. Contracts
+
+- `script-src` must include `'wasm-unsafe-eval'` and must not add the broader `'unsafe-eval'`.
+- Image-addon activation failure must dispose the partially registered addon, log a warning, and continue terminal initialization.
+- Successful activation preserves existing SIXEL, IIP, and Kitty image support.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| WebAssembly allowed and addon activates | Keep terminal image support enabled |
+| CSP or WebView rejects WebAssembly | Warn and continue without terminal image support |
+| WebGL is unavailable or disabled | Keep the existing path that does not load the image addon |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a supported WebView loads WebGL and `ImageAddon`; image protocols remain available.
+- Base: WebGL is disabled by theme, transparency, settings, or platform policy; the default renderer remains usable.
+- Bad: `terminal.loadAddon(imageAddon)` throws and aborts the React terminal initialization effect.
+
+### 6. Tests Required
+
+- `node --test scripts/terminalImageAddonCsp.test.mjs`: assert the CSP token and local fallback guard.
+- `npx tsc --noEmit`: assert the terminal initialization path remains type-safe.
+- Manual Windows check: create a terminal on a WebView2 runtime that previously rejected WASM and confirm the terminal opens; image support may degrade, but the terminal must remain usable.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```tsx
+terminal.loadAddon(imageAddon);
+```
+
+```json
+"script-src 'self' 'unsafe-eval'"
+```
+
+#### Correct
+
+```tsx
+try {
+  terminal.loadAddon(imageAddon);
+} catch (err) {
+  imageAddon.dispose();
+  logWarn("Failed to load terminal image addon; continuing without terminal image support", { sessionId, err });
+}
+```
+
+```json
+"script-src 'self' 'wasm-unsafe-eval'"
+```
+
+### Convention: Terminal display state stays in the Display controller
+
+**What**: `useTerminalDisplay` owns renderer state and output-direction state: `WebglAddon`, fit/viewport scheduling, active write queue, inactive output buffer, and the `pty-output-{sessionId}` listener. `XTermTerminal` only orchestrates the terminal instance and passes narrow ref/callback contracts into the hook.
+
+**Why**: Display, input, and OSC handling previously shared one large lifecycle closure. Moving only the display-owned refs and listener into one controller means an input change cannot accidentally alter output buffering or renderer cleanup.
+
+**Correct**:
+
+```tsx
+const display = useTerminalDisplay({
+  terminalRef,
+  fitAddonRef,
+  isVisibleRef,
+  isComposingRef,
+  normalizeOutputRef,
+  transformOutputRef,
+});
+
+// Output direction belongs to Display.
+const detachPtyOutput = display.attachPtyOutput();
+```
+
+**Contracts**:
+
+- The orchestrator owns writes to `terminalRef` and `isVisibleRef`; Display reads them only.
+- Input owns writes to `isComposingRef`; Display reads it only to suppress a fit during IME composition.
+- Display-owned queue, buffer, renderer, and PTY-listener refs must not be recreated in `XTermTerminal` or accessed by Input.
+- Display transforms output through the supplied OSC/cursor callbacks before writing; it must not import Input state or register `terminal.onData`.
+
+**Tests**: Run `npx tsc --noEmit` and `node scripts/terminalVisibility.test.mjs`. Manually verify tab switching with background output, resize, WebGL restoration, and IME composition after any Display controller change.
+
+### Convention: Terminal focus requires active and visible layout state
+
+**What**: `XTermTerminal` may focus xterm only when the session is globally active, currently visible, and no visibility-restore mask is pending. On Tab, Workspan, history-workspace, or split-pane transitions, wait for the progressive restore mask to clear, then defer `terminal.focus()` to the next animation frame.
+
+**Why**: `isActive` can update before pane/workspan visibility. Synchronous focus against a hidden xterm helper textarea is lost when layout finishes, forcing the user to click again; focusing every visible split would instead steal input from the globally active pane.
+
+**Contracts**:
+
+- Depend on both `isActive` and `isVisible`.
+- Blur when either value is false.
+- Include `visibilityRestorePending` in the focus effect dependencies so clearing the restore mask schedules a new focus attempt.
+- Re-check `terminalRef`, `isActiveRef`, and `isVisibleRef` inside the animation-frame callback.
+- Re-check `visibilityRestorePendingRef` inside the animation-frame callback so an older frame cannot focus a terminal that has entered another restore cycle.
+- Cancel the pending frame during effect cleanup.
+- A visible but inactive split pane renders live output but never takes keyboard or IME focus.
+
+**Tests**: Switch by mouse, keyboard, Workspan, and split pane; return from history and fullscreen; verify focus is applied only after the visibility-restore mask clears, then type immediately without clicking and confirm input reaches only the active visible terminal.
+
+### Convention: Async terminal suggestions are scoped to one input attachment
+
+**What**: `useTerminalInput.attachSuggestions()` resets all suggestion state and assigns an attachment generation. Delayed template/history/path/AI results must verify that generation before they update the ghost suggestion.
+
+**Why**: Input suggestions are asynchronous while terminal sessions can be disposed and recreated immediately. Resetting shared refs alone lets an old request observe the new session's reset state and paint stale text into its terminal.
+
+**Correct**:
+
+```tsx
+const generation = resetSuggestionState();
+const isCurrentAttachment = () => (
+  attachmentGenerationRef.current === generation && !suggestionDisposedRef.current
+);
+
+const result = await getTerminalInputSuggestionAiResult(context);
+if (!isCurrentAttachment() || context.input !== getInput()) return;
+```
+
+**Contracts**:
+
+- `attachSuggestions()` resets timers, in-flight flags, request ids, cache, previous-command state, and the visible ghost before registering a new session.
+- Every asynchronous completion and delayed timer checks the current attachment generation before mutating a ref or React state.
+- Cleanup invalidates only its own attachment; it must not clear callbacks installed by a newer session.
+
+**Tests**: Run `npx tsc --noEmit`. With AI suggestions enabled, type a prefix and immediately switch sessions or close/reopen the tab; no ghost text from the old session may appear. Also verify local, path, and AI suggestions still accept with Tab, Right Arrow, and Ctrl+Space.
+
+### Convention: Visibility restoration prefers natural rendering with a bounded refresh fallback
+
+**What**: When `XTermTerminal` changes from hidden to visible, mask the drawing container synchronously, fit the terminal immediately without forcing a full viewport refresh, and wait for xterm's natural visibility-resume render. If no full-viewport `Terminal.onRender` arrives within two animation frames, request one full refresh. Renderer recreation still refreshes immediately. Reveal on the next animation frame after the full render and keep a bounded timeout fallback.
+
+**Why**: Coupling `scheduleFit(true)` to `Terminal.refresh(0, rows - 1)` makes every ordinary Tab switch repaint the complete viewport and can visibly draw from top to bottom. Never forcing a refresh reintroduces the intermittent blank/stale terminal bug. Keeping immediate resize and forced viewport refresh as separate decisions preserves both fast normal switching and a bounded recovery path.
+
+**Correct**:
+
+```tsx
+const beginVisibilityRestore = (deferViewportRefresh: boolean) => {
+  visibilityRestorePendingRef.current = true;
+  setVisibilityRestorePending(true);
+  revealTimerRef.current = window.setTimeout(finishVisibilityRestore, 500);
+  if (deferViewportRefresh) scheduleTwoFrameRefreshFallback();
+};
+
+terminal.onRender((range) => {
+  if (!visibilityRestorePendingRef.current) return;
+  if (!didRenderFullTerminalViewport(range, terminal.rows)) return;
+  revealRafRef.current = window.requestAnimationFrame(finishVisibilityRestore);
+});
+
+// Ordinary visibility restore: resize now, refresh only if natural rendering stalls.
+beginVisibilityRestore(true);
+scheduleFit(true, false);
+
+// Recreated WebGL/default renderer: the canvas is known to need a complete refresh.
+beginVisibilityRestore(false);
+scheduleFit(true, true);
+
+const hidden = inactiveReplayPending || visibilityRestorePending;
+```
+
+**Wrong**:
+
+```tsx
+// This forces a complete repaint on every ordinary Tab switch.
+if (becameVisible) {
+  markViewportRefreshNeeded();
+  scheduleFit(true);
+}
+
+// This has no bounded recovery when xterm does not naturally repaint.
+if (becameVisible) scheduleFit(true, false);
+```
+
+**Contracts**:
+
+- Mask only the xterm drawing container; keep the wrapper/background mounted and never recreate the `Terminal`, PTY listener, addons, scrollback, or input state.
+- The hidden-to-visible render must be masked synchronously from the first visible React commit, before the visibility effect schedules fit/refresh.
+- `scheduleFit(immediateResize, forceViewportRefresh)` keeps immediate geometry synchronization separate from complete viewport repainting. Existing callers that pass only `true` retain the explicit full-refresh behavior.
+- Ordinary Tab/Workspan visibility restore calls `scheduleFit(true, false)` and gives xterm two animation frames to emit a natural full-viewport render.
+- If no full render arrives within those two frames, mark the viewport dirty and call `scheduleFit(true, true)`. WebGL/default-renderer recreation takes this immediate full-refresh path without waiting.
+- Use the public `Terminal.onRender` row range as the primary completion signal. A full viewport render covers row `0` through the current `terminal.rows - 1`.
+- Reveal on the next animation frame after the full render event so canvas/WebGL output can reach the compositor.
+- Keep a short final timeout fallback and clear the reveal timer, reveal frame, two-frame refresh fallback, and pending state on repeated restores, visibility loss, and unmount.
+- Inactive-output replay masking remains independent. Clearing visibility-refresh masking must not reveal a terminal whose queued replay is still running.
+
+**Tests**:
+
+- Unit-test full, partial, and zero-row render-range decisions.
+- Unit-test that immediate fit can skip viewport refresh and that an explicit refresh still repaints the complete grid when dimensions are unchanged.
+- Run `npx tsc --noEmit` and the terminal visibility regression tests.
+- Manually switch normal tabs and Workspans repeatedly; verify there is no progressive diagonal repaint.
+- Manually switch back to a terminal with background output; verify the final buffer appears without blanking, partial replay, lost scrollback, or shell restart.
+- Manually verify the timeout fallback cannot leave the terminal permanently hidden.
+
+### Convention: Custom terminal scrollback keeps one effective row count
+
+**What**: `terminalScrollbackCustomEnabled` defaults to `false`. When it is disabled, every terminal uses `TERMINAL_SCROLLBACK_ROWS_DEFAULT` (9000). When enabled, terminals use the validated `terminalScrollbackRows` value in the 1000–50000 range.
+
+**Contracts**:
+
+- Terminal construction, xterm option hot updates, and hidden-output buffer sizing must all use the same effective row count.
+- Changing the switch or row value must update the existing xterm instance; do not recreate the terminal, reconnect the PTY, or reset addons/input state.
+- Keep the saved custom value while the switch is disabled so re-enabling restores the user's value.
+- Hidden terminal output remains bounded; disabling custom rows does not mean unlimited scrollback.
+
+**Tests**: Run `npx tsc --noEmit`; manually toggle Custom in Settings > Terminal and verify existing/new/hidden terminals use 9000 rows while disabled and the saved custom value while enabled.
+
+### Convention: Session history transcripts use a history render layer before Markdown
+
+**What**: When rendering Claude/Codex session history message bodies, use `src/features/history/api/SessionTranscriptContent.tsx` instead of rendering raw message content directly with `MarkdownContent`. `SessionTranscriptContent` may detect session-log structures such as XML-ish blocks, workflow-state blocks, Git status lines, long lists, paths, commit hashes, and status tokens; ordinary Markdown content must still delegate to `HistoryMarkdownContent` / shared `MarkdownContent`.
+
+**Why**: History files are mixed transcripts, not pure Markdown. They contain system context, workflow metadata, Git changes, paths, and task states. A render-layer adapter preserves readability without changing backend history parsing, storage, or the shared Markdown safety policy.
+
+**Correct**:
+
+```tsx
+import { SessionTranscriptContent } from "./SessionTranscriptContent";
+
+<SessionTranscriptContent content={message.content} query={sessionQuery} />
+```
+
+**Wrong**:
+
+```tsx
+<MarkdownContent content={message.content} query={sessionQuery} />
+```
+
+**Contracts**:
+
+- Keep transcript parsing render-only; do not mutate stored history data or backend parsing contracts for visual grouping.
+- Keep unsupported transcript text safe by falling back to the shared Markdown path.
+- `HistoryMarkdownContent` may unwrap one complete top-level `md` / `markdown` source fence before handing history content to `MarkdownContent`, so fenced GFM tables render as tables; ordinary, partial, mislabeled, and nested code fences remain literal code.
+- Do not use `dangerouslySetInnerHTML` for transcript highlighting.
+- Do not add a second Markdown parser inside history components.
+- Long transcript sections should remain bounded through collapse/preview behavior so virtualized message rows do not inflate unnecessarily.
+
+**Tests**: Run `npx tsc --noEmit`, `node --test scripts/historyMarkdownRendering.test.mjs`, and manually inspect a history session containing XML-ish blocks, workflow-state blocks, Git changes, long lists, normal Markdown, a fenced GFM table, ordinary code, and nested code fences in both app themes.
+
+### Convention: History session parent-child grouping is render-only and conservative
+
+**What**: When the history sidebar groups main agent sessions and subagent transcript sessions, keep the grouping in the render layer. Derive child sessions only from explicit path structure such as `.../<parent-session-id>/subagents/agent-*.jsonl`, and only attach them when the matching parent session is already present in the currently loaded list.
+
+**Why**: History loading is paginated and source/project filtered. Scanning outside the current page or matching by loose path/session hints can add latency and can incorrectly attach a subagent to the wrong parent. A conservative render-only transform preserves the backend history contract and avoids misleading UI.
+
+**Correct**:
+
+```tsx
+const parentSessionId = inferSubagentParentSessionId(session);
+const parent = currentRowsBySessionId.get(`${session.source}:${session.project_key}:${parentSessionId}`);
+if (parent) {
+  attachChildUnderLoadedParent(parent, session);
+}
+```
+
+**Wrong**:
+
+```tsx
+// Do not scan all history files or attach by project/path similarity when the parent is not loaded.
+const guessedParent = findAnySessionWithSameProject(session);
+attachChildUnderLoadedParent(guessedParent, session);
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually verify a loaded parent with `subagents/agent-*.jsonl` children renders as a tree, while an orphan child remains a normal row.
+
+### Convention: History session source icons use explicit source mapping
+
+**What**: History session list source icons must map known history `source` values explicitly. Use `claude` -> `VendorKey "claude"` and `codex` -> `VendorKey "openai"` or the current Codex/OpenAI brand icon. Use `inferVendor(source)` only as a fallback for unknown future source strings.
+
+**Why**: `source` is an app-level history source identifier, not a provider/model name. Passing it directly through generic vendor inference can make Claude and Codex sessions share the wrong icon when inference rules change or overlap with model/provider names.
+
+**Correct**:
+
+```tsx
+const vendor =
+  source === "claude" ? "claude" :
+  source === "codex" ? "openai" :
+  inferVendor(source);
+```
+
+**Wrong**:
+
+```tsx
+const vendor = inferVendor(source);
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually verify the history list renders different source icons for Claude and Codex sessions in both light and dark themes.
+
+### Convention: Keep settings tab ids stable when only renaming UI labels
+
+**What**: In `SettingsModal`, `SettingsTab` ids are part of the internal navigation contract. When a change only renames or reorganizes a settings page, keep the existing tab id and update only the visible label/title/description.
+
+**Why**: Settings tabs are passed through props such as `onOpenSettings(tab?: SettingsTab)`. Renaming an id like `"terminal-theme"` to `"terminal-settings"` creates unnecessary type and call-site churn without changing persisted settings or runtime behavior.
+
+**Example**:
+
+```tsx
+// Good: stable id, renamed UI copy only
+const SETTINGS_TAB_CONFIG = {
+  "terminal-theme": {
+    label: "终端设置",
+    title: "终端设置",
+  },
+};
+
+// Bad: id churn for a display-only rename
+type SettingsTab = "general" | "terminal-settings" | "shortcuts";
+```
+
+**Tests**: After changing settings page labels or layout, assert that existing callers can still open the page through the old `SettingsTab` literal and run `npx tsc --noEmit`.
+
+### Convention: Settings top search appears only for tabs with real filtering
+
+**What**: In `SettingsModal`, set `searchPlaceholder` only for tabs whose page consumes `searchValue` to filter visible content. For tabs without filtering, omit `searchPlaceholder` and let `SettingsTopBar` render only the close button.
+
+**Why**: A placeholder like "搜索通用设置（预留）" makes an unfinished feature look interactive. Optional `searchPlaceholder` keeps real search working for pages such as shortcuts/templates without showing dead controls on static settings pages.
+
+**Example**:
+
+```tsx
+// Good: only pages with real filtering expose search
+const SETTINGS_TAB_CONFIG = {
+  shortcuts: { label: "快捷键", searchPlaceholder: "搜索快捷键" },
+  hooks: { label: "Hook 设置" },
+};
+
+// Good: top bar treats search as optional
+{searchPlaceholder && <Input value={searchValue} placeholder={searchPlaceholder} />}
+
+// Bad: reserved search that does not filter anything
+const hooks = { label: "Hook 设置", searchPlaceholder: "搜索 Hook 设置（预留）" };
+```
+
+**Tests**: After changing settings search behavior, run `npx tsc --noEmit` and manually verify searchable tabs still filter while static tabs do not show a search input.
+
+### Convention: Project provider badges flow through sidebar tree context
+
+**What**: Project-level provider badge rendering must consume `projectStore.providerBadges` through the sidebar tree context and render in `TreeNodeItem`. Badge data is produced by the store, not recomputed in individual tree rows.
+
+**Why**: Provider switching has multiple adapters: Claude badges are probed by the backend from `.claude/settings.json`, while Codex badges come from `project.provider_overrides.codex`. Keeping both sources normalized in `projectStore.providerBadges` prevents sidebar rows from duplicating provider-specific logic and avoids regressions where switching succeeds but the project tree chip disappears.
+
+**Correct**:
+
+```tsx
+// Sidebar root subscribes once and passes the normalized map through context.
+const { tree, providerBadges } = useProjectStore(useShallow((s) => ({
+  tree: s.tree,
+  providerBadges: s.providerBadges,
+})));
+
+<TreeContext.Provider value={{ ...treeActions, providerBadges }}>
+  <ProjectTree tree={tree} />
+</TreeContext.Provider>
+
+// TreeNodeItem reads providerBadges[project.id] and renders the existing chip.
+```
+
+**Wrong**:
+
+```tsx
+// Do not probe cc-switch or parse provider_overrides inside every tree row.
+const badge = await invoke("ccswitch_probe_projects", { projectPaths: [project.path] });
+```
+
+**Contracts**:
+
+- `projectStore.refreshProviderBadges()` is the single refresh point for provider badge data.
+- Claude project badges come from backend `ccswitch_probe_projects` and preserve the previous `.claude/settings.json` behavior.
+- Codex project badges come from `provider_overrides.codex` and must not trigger cc-switch DB reads per row.
+- Badge chips must preserve the provider/vendor icon SVG when `inferVendor(providerName)` can infer one; do not regress to text-only chips.
+- Rows with an override but no matched provider name use the localized custom-provider fallback.
+- After applying or resetting a provider in `ProviderSwitchModal`, call `refreshProviderBadges()` so the tree chip updates without requiring an app restart.
+
+**Tests**: Run `npx tsc --noEmit`; manually switch a Claude provider and a Codex provider and verify the project tree chip appears/clears immediately and after a fresh `fetchAll()`.
+
+### Convention: Collapsed project tree preserves expanded project semantics
+
+**What**: The collapsed project strip and group flyout must use the same CLI identity and interaction contract as the expanded project tree. Resolve the project CLI with `resolveCliToolIconKey` and render it with `CliToolIcon`; a single click selects the project and activates an existing terminal Tab, while a double click calls `onOpenProject` to start a new terminal. The running-session count remains a badge and must not replace the CLI icon with a status dot.
+
+**Why**: The collapsed tree is a presentation variant of the same project navigator, not a separate launch surface. Divergent click handlers caused a single click to start terminals, and status-first rendering hid the configured CLI tool identity.
+
+**Correct**:
+
+```tsx
+const cliIcon = resolveCliToolIconKey(project.cli_tool);
+
+<button
+  onClick={(event) => actions.onSelectProject(event, project)}
+  onDoubleClick={() => actions.onOpenProject(project)}
+>
+  {cliIcon ? <CliToolIcon icon={cliIcon} size={15} /> : <Terminal size={15} />}
+</button>
+```
+
+**Wrong**:
+
+```tsx
+// Collapsed-only behavior: single click starts a new terminal and status hides the CLI icon.
+<button onClick={() => actions.onOpenProject(project)}>
+  {status ? <StatusDot /> : <VendorIcon vendor={vendor} />}
+</button>
+```
+
+**Contracts**:
+
+- Expanded and collapsed project rows use the same `onSelectProject`/`onOpenProject` semantic boundary.
+- Group flyout project rows also reserve single click for selection and only close the flyout after the double-click launch path.
+- CLI icon lookup is shared with `TreeNodeItem`, project creation, history, and terminal Tab rendering; do not introduce a second vendor-to-icon map.
+- The collapsed flyout background is opaque enough to keep project names and icons legible over the terminal content.
+
+### Common Mistake: Passing `undefined` when a project menu needs a plain Shell
+
+**Symptom**: Project or Worktree context-menu “New Terminal” unexpectedly starts the configured CLI or custom startup command.
+
+**Cause**: `terminalStore.createSession(projectId, cwd, title, startupCmd, ...)` treats `startupCmd: undefined` as “resolve the project startup configuration”. That is different from an explicit empty string, which means the new session has no startup command.
+
+**Correct**:
+
+```tsx
+await createSession(project.id, project.path, project.name, "", undefined, project.shell || undefined);
+```
+
+**Contracts**:
+
+- Project and Worktree context-menu new-terminal handlers must pass `""` for `startupCmd` when they need a plain Shell in the target directory.
+- Preserve `projectId`, `cwd`, `shell`, and `worktreeId`; only startup-command inheritance is disabled.
+- Do not change the `undefined` semantics in the shared store: other entry points use it to inherit project configuration or resume commands.
+
+**Tests**: Inspect both local project and Worktree handlers and manually verify a project with `cli_tool`, `cli_args`, and `startup_cmd` opens at its project directory with only the Shell prompt; verify shortcut/command-palette new terminals and session restore retain their existing behavior.
+
+**Tests**: Run `npx tsc --noEmit`; manually verify a running Claude/Codex project and a stopped project in collapsed and expanded modes: single click switches to an existing Tab, double click starts a new Tab, the CLI icon stays visible, the terminal-count badge remains, and the group flyout does not show terminal content through its background.
+
+### Convention: Terminal tab drag uses overlay plus explicit pane drop zones
+
+**What**: Terminal tab drag interactions use dnd-kit `DragOverlay` for the cursor-following tab, while pane movement/splitting is driven by explicit drop ids:
+
+```typescript
+type TerminalPaneDropEdge = "left" | "right" | "top" | "bottom";
+type PaneDropTarget =
+  | { type: "center"; paneId: string }
+  | { type: "edge"; paneId: string; edge: TerminalPaneDropEdge };
+```
+
+**Why**: sortable tab transforms are optimized for in-list reordering and can visually lock a tab to the tab bar. Pane-level drop zones make center move and edge split behavior testable without guessing from DOM position after drop.
+
+**Intent boundary**:
+
+- A Workspan dragged inside the top tab bar remains a sortable tab operation.
+- Middle-clicking either a session Tab or a Workspan Tab calls the existing
+  close path after preventing the browser's auxiliary-click default. Ignore it
+  while the Tab is being renamed or dragged; do not introduce a second close
+  or confirmation path.
+- Once the pointer enters a pane content rectangle, its outer directional regions become split targets. Resolve left/right/top/bottom from the pointer position relative to the pane center, while keeping a neutral center region so entering a pane does not immediately force a split.
+- Session tabs inside a multi-view pane keep the existing center-move and explicit edge-split behavior.
+- Collision detection identifies the pane only. Resolve the Workspan split direction in `onDragOver` and `onDragEnd` from `activatorEvent + delta` and `over.rect`; do not synthesize a pane-edge collision inside the collision detector.
+- The dragged Workspan is the source and the currently visible Workspan is the target. They must be different Workspans.
+
+**Correct**:
+
+```tsx
+<DndContext collisionDetection={terminalTabCollisionDetection}>
+  <SplitTerminalView node={paneTree} renderLeaf={renderLeaf} />
+  <DragOverlay dropAnimation={null}>{activeTabOverlay}</DragOverlay>
+</DndContext>
+
+const dropTarget = parsePaneDropTarget(String(event.over.id));
+const edge = dropTarget ? resolveWorkspanDropEdge(event, dropTarget) : null;
+if (edge) setActiveDropPreview({ paneId: dropTarget.paneId, edge });
+```
+
+**Wrong**:
+
+```tsx
+// Do not infer pane splits from tab bar reorder transforms only.
+const horizontalTransform = transform ? { ...transform, y: 0 } : transform;
+```
+
+**Tests**: For terminal drag UI changes, run `npx tsc --noEmit` and manually verify top-bar Workspan sorting, neutral pane center behavior, outer-region Workspan directional splitting, same-pane reorder, pane-center move, and left/right/top/bottom edge split previews in the Tauri desktop app.
+
+### Convention: Drag responsiveness uses shared thresholds and frame-bounded previews
+
+**What**: Sortable surfaces use `DND_ACTIVATION_CONSTRAINT` and `DND_SORTABLE_TRANSITION` from `src/features/workspace/api/dragInteraction.ts`. Custom pointer drags use the same start distance, while cursor-following previews update DOM transforms at most once per animation frame.
+
+**Why**: Divergent 5-8px activation distances and dnd-kit's default 200ms transform transition make similar drag surfaces feel inconsistent. Calling a large parent component's `setState` on every `pointermove` also rerenders expensive trees and terminal children faster than the browser can paint.
+
+**Correct**:
+
+```tsx
+const sensors = useSensors(
+  useSensor(PointerSensor, { activationConstraint: DND_ACTIVATION_CONSTRAINT })
+);
+
+useSortable({ id, transition: DND_SORTABLE_TRANSITION });
+
+pendingPointRef.current = { x, y };
+frameRef.current ??= requestAnimationFrame(() => {
+  frameRef.current = null;
+  const pending = pendingPointRef.current;
+  if (pending && previewRef.current) {
+    previewRef.current.style.transform = `translate3d(${pending.x}px, ${pending.y}px, 0)`;
+  }
+});
+```
+
+**Wrong**:
+
+```tsx
+useSensor(PointerSensor, { activationConstraint: { distance: 8 } });
+
+const onPointerMove = (event: PointerEvent) => {
+  setPreview({ x: event.clientX, y: event.clientY });
+};
+```
+
+**Contracts**:
+
+- Keep a non-zero activation distance so clicks, double-click rename, buttons, and context menus remain usable.
+- Disable transform transitions for the actively dragged source; only displaced siblings use the short sortable transition.
+- Do not write an equivalent drop-preview object when pane id and edge are unchanged.
+- Hidden Workspans and hidden/fullscreen-excluded panes must disable their droppable regions.
+- React state may create and remove a custom drag preview, but pointer movement uses `requestAnimationFrame` plus direct DOM transform updates.
+
+**Tests**: Run `npx tsc --noEmit`; manually verify project/group sorting, terminal Tab/Workspan/toolbar sorting, settings-card sorting, file-tree preview tracking, pane-edge previews, and click/double-click behavior.
+
+### Convention: Terminal split layout uses flat absolute positioning to preserve component identity
+
+**What**: `SplitTerminalView` renders pane leaves and dividers using flat absolute positioning with computed geometry rather than nested flexbox recursion. All pane leaves are direct children keyed by `pane.id` under a single parent container.
+
+**Why**: When a pane leaf is split using nested rendering, the original leaf moves to a new React parent path (wrapped by the new split node), causing `PaneLeafView` and its child `XTermTerminal` to remount. This remount destroys the xterm.js instance's in-memory scrollback buffer, making terminal history disappear after manual split or sub-agent hook auto-split.
+
+**Implementation**:
+
+```typescript
+interface Rect { left: number; top: number; width: number; height: number; }
+interface LeafLayout { leaf: TerminalPaneLeaf; rect: Rect; }
+interface DividerLayout { split: TerminalPaneSplit; rect: Rect; splitRect: Rect; }
+
+function buildSplitLayout(node: TerminalPaneNode, rect: Rect): { leaves: LeafLayout[]; dividers: DividerLayout[] } {
+  if (node.type === "leaf") return { leaves: [{ leaf: node, rect }], dividers: [] };
+  
+  // Compute first/second pane rects and divider rect from split ratio + DIVIDER_SIZE
+  const firstLayout = buildSplitLayout(node.first, firstRect);
+  const secondLayout = buildSplitLayout(node.second, secondRect);
+  
+  return {
+    leaves: [...firstLayout.leaves, ...secondLayout.leaves],
+    dividers: [{ split: node, rect: dividerRect, splitRect: rect }, ...firstLayout.dividers, ...secondLayout.dividers],
+  };
+}
+
+// Render all leaves as stable keyed children; split/unsplit only changes style.left/top/width/height
+<div className="relative h-full w-full overflow-hidden">
+  {layout.leaves.map(({ leaf, rect }) => (
+    <div key={leaf.id} className="absolute overflow-hidden" style={rectStyle(rect)}>
+      {renderLeaf(leaf)}
+    </div>
+  ))}
+  {layout.dividers.map(({ split, rect }) => (
+    <div key={split.id} onMouseDown={(e) => handleDragStart(split, e)} style={rectStyle(rect)} />
+  ))}
+</div>
+```
+
+**Contracts**:
+
+- `buildSplitLayout` recursively walks the split tree and computes absolute rectangles for every leaf and divider. Geometry uses same 4px `DIVIDER_SIZE` and `split.ratio` as prior nested flexbox layout for visual equivalence.
+- Divider drag calculates ratio relative to the split's own computed rectangle (`splitRect`), not the root container, so nested split drags work correctly.
+- `PaneLeafView` keeps `key={pane.id}` stable; when a leaf is split, only its `style` props change — React preserves the original component instance.
+- ResizeObserver on the container recalculates layout when window/pane size changes; `useMemo` avoids redundant geometry computation.
+
+**Tests**: For changes affecting split rendering, run `npx tsc --noEmit` and manually verify in the desktop app:
+
+- [ ] After outputting terminal history, manually split the terminal; original pane history remains visible and scrollable.
+- [ ] Sub-agent hook auto-split creates transcript pane; parent terminal history remains visible.
+- [ ] Divider drag resizing still works; nested splits resize correctly.
+- [ ] Pane tab switching and session activation unchanged.
+
+### Convention: Terminal resize drag uses DOM preview, then commits once
+
+**What**: For terminal split dividers and terminal-side resizable panels, the drag interaction must update wrapper geometry directly in the DOM during `mousemove` and commit the final width/ratio to React/Zustand state on `mouseup`. Do not write local/global React state or rerender embedded terminals, stats, or git panels on every drag frame.
+
+**Why**: Terminal panes contain xterm, realtime stats, and git views. Even component-local preview state still makes `SplitTerminalView` rebuild and reconcile every pane wrapper per frame. VS Code's SplitView/Sash path updates view geometry directly and commits proportions at drag end; matching that boundary keeps pointer tracking independent from React rendering.
+
+**Correct**:
+
+```tsx
+const onMove = (event: MouseEvent) => {
+  pendingWidthRef.current = nextWidth;
+  if (frameRef.current === null) {
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = null;
+      panelRef.current!.style.width = `${pendingWidthRef.current}px`;
+    });
+  }
+};
+
+const onUp = () => {
+  const finalWidth = pendingWidthRef.current ?? widthRef.current;
+  setWidth(finalWidth);
+  localStorage.setItem(storageKey, String(finalWidth));
+};
+```
+
+```tsx
+const onMove = (event: MouseEvent) => {
+  pendingRatioRef.current = clampSplitRatio(rawRatio);
+  if (rafId === null) {
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      applySplitLayoutToElements(buildSplitLayout({
+        splitId,
+        ratio: pendingRatioRef.current,
+      }));
+    });
+  }
+};
+
+const onUp = () => {
+  applyFinalPreview();
+  setSplitRatio(splitId, pendingRatioRef.current);
+};
+```
+
+**Wrong**:
+
+```tsx
+const onMove = (event: MouseEvent) => {
+  setWidth(nextWidth);
+};
+```
+
+```tsx
+const onMove = (event: MouseEvent) => {
+  setSplitRatio(splitId, nextRatio);
+};
+```
+
+**Contracts**:
+
+- Drag preview updates pane/divider wrapper geometry directly in the DOM at most once per animation frame; React state is limited to drag start/end presentation state.
+- Keep the latest live layout in a ref so an unrelated React render cannot restore stale persisted geometry during the drag.
+- The persistent width/ratio source of truth updates once on drag end, after synchronously applying the last pointer position.
+- For split panes, keep pane content component identity stable while only wrapper geometry changes.
+- For terminal-side panels, avoid rerendering `TerminalStatsPanel` / `GitChangesPanel` on every mousemove.
+
+**Tests**: Run `npx tsc --noEmit`; manually verify split drag, stats panel drag, and git panel drag remain smooth while persisted width/ratio still survives reopen.
+
+### Convention: Git tree compresses consecutive single-child directory chains at render time
+
+**What**: In `GitTreeNodeComponent`, when rendering a directory node, walk consecutive single-child directory chains and compress them into a single display row showing the top directory name plus a weakened path suffix (JetBrains style).
+
+**Why**: Deep directory structures such as Java package paths (`src/main/java/com/example/service/impl`) consume excessive vertical space when rendered one level per row. Compression reduces scrolling and makes file changes more visible without altering the underlying tree data or behavior.
+
+**Example**:
+
+```tsx
+// Helper: collect consecutive single-child directory chain
+function collectCompactDirectoryChain(node: GitTreeNode): { suffixParts: string[]; leaf: GitTreeNode } {
+  const suffixParts: string[] = [];
+  let leaf = node;
+
+  while (leaf.type === "directory" && leaf.children?.length === 1 && leaf.children[0].type === "directory") {
+    const next = leaf.children[0];
+    suffixParts.push(next.name);
+    leaf = next;
+  }
+
+  return { suffixParts, leaf };
+}
+
+// Render: top directory keeps icon, suffix parts shown in dimmed text
+const { suffixParts, leaf: displayNode } = collectCompactDirectoryChain(node);
+
+<span className="flex min-w-0 flex-1 items-baseline gap-1 truncate">
+  <span className="truncate" style={{ color: TERM.fg }}>{node.name}</span>
+  {suffixParts.length > 0 && (
+    <span className="truncate text-[12px] font-normal" style={{ color: TERM.dim }}>
+      {suffixParts.join("\\")}
+    </span>
+  )}
+</span>
+```
+
+**Contracts**:
+
+- Compression stops when a directory has multiple children or a child is a file (branch point).
+- Collapse/expand behavior uses the leaf node's path as the collapse key, not the top node's.
+- Directory-level checkbox and file collection apply to the leaf node's subtree.
+- Original tree structure from `gitStore` is unchanged; compression is render-only.
+
+**Why render-layer instead of data-layer**: Keeping the original tree structure unchanged preserves collapse state, file collection logic, and diff display paths. Render-layer compression only affects display label composition.
+
+**Tests**: After changing Git tree rendering, run `npx tsc --noEmit` and manually verify in the desktop app:
+
+- [ ] Deep directory chains compress into single rows with primary name + dimmed suffix.
+- [ ] Clicking a compressed directory row expands/collapses the chain's leaf children.
+- [ ] Directory checkbox state correctly reflects all files under the compressed chain.
+- [ ] File paths in diff viewer still match the full repository path.
+- [ ] Compression applies to both tracked and untracked trees.
+
+---
+
+## Styling Patterns
+
+### Convention: Project-tree hover actions preserve row geometry
+
+**What**: A project row in `TreeNodeItem` that uses `.ui-tree-item-actions` must keep its action container in the flex layout at all times. Let the existing `.ui-tree-item-actions` opacity, visibility, pointer-events, and transform rules control the hover transition; do not swap the container between Tailwind `hidden` and `group-hover:flex`.
+
+**Why**: Toggling `display` inserts the 22px start-action button only after the pointer enters the row. In a narrow sidebar this reflows the project title and badges, which appears as hover jitter and can make the pointer target feel unstable.
+
+**Correct**:
+
+```tsx
+<span className="ui-tree-item-actions flex shrink-0 items-center gap-0.5">
+  <button className="icon-btn">…</button>
+</span>
+```
+
+**Wrong**:
+
+```tsx
+<span className="ui-tree-item-actions hidden shrink-0 group-hover/item:flex">
+  <button className="icon-btn">…</button>
+</span>
+```
+
+**Contracts**:
+
+- The project title and metadata keep a stable available width before, during, and after hover.
+- The hidden action remains non-interactive until the existing hover/focus CSS exposes it.
+- Do not change project selection, drag activation, double-click launch, or the folder/worktree action contracts as part of this visual fix.
+
+**Tests**: Run `npx tsc --noEmit` and `npm run build`. Manually hover a project with a long name and terminal/provider badges in compact and comfortable sidebar density, then verify the title, badges, row position, hover action, click, double-click, and drag behavior stay stable in one light and one dark theme.
+
+### Convention: Terminal auxiliary panels share one themed header
+
+**What**: Realtime stats, Git changes, project files in `mode="panel"`, replay, system resources, and the provider quick-switch panel must render their top title through `TerminalPanelHeader`. The shared header uses `TERM_PANEL.bg` as its fallback and mirrors the terminal pane Tab bar gradient in both light and dark terminal themes.
+
+**Why**: These panels share one resizable terminal-side shell. Independent header markup drifts in height, icon scale, border color, and light-skin background, making adjacent Tab and title bands look unrelated.
+
+**Contracts**:
+
+- Keep the shared header at the same 36 px height and background treatment as `.ui-workspan-tabbar`. Keep its 24 px icon container, 12 px title, and terminal-theme border unchanged.
+- Preserve panel-owned titles, subtitles, badges, and actions through component slots; do not move data loading or interaction state into the header component.
+- Keep panel body backgrounds independent. Patterned or card backgrounds start below the header.
+- `FileExplorerSidebar` uses the shared header only in `mode="panel"`; the primary left-sidebar header keeps its existing navigation behavior and styling.
+
+```tsx
+// Correct: shared shell, panel-owned content.
+<TerminalPanelHeader
+  icon={<GitBranch size={13} />}
+  accent={TERM_PANEL.yellow}
+  title={t("git.title")}
+  actions={headerActions}
+/>
+
+// Wrong: another one-off title row that inherits a body-only background.
+<div className="px-2 py-1 text-[15px] font-bold">{t("git.title")}</div>
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually compare all six panels in merged and independent modes, at their minimum widths, with one dark and one light terminal-side skin.
+
+### Convention: Stats charts use a shared semantic palette
+
+**What**: Stats and usage-analysis chart components should import semantic colors from `src/features/stats/api/statsPalette.ts` instead of hard-coding one-off hex/RGBA colors for token series, peak markers, cost fills, or chart tooltips.
+
+**Why**: The app supports multiple light/dark themes. Hard-coded high-saturation chart colors can clash with theme surfaces and make related charts disagree visually. A shared palette keeps History Stats and ccusage charts consistent while still deriving colors from theme tokens.
+
+**Example**:
+
+```tsx
+import { ACCENT, CHART_TOOLTIP, PEAK, SERIES_COLORS } from "./statsPalette";
+
+const option = {
+  color: [ACCENT, SERIES_COLORS.input, SERIES_COLORS.output],
+  tooltip: { trigger: "axis", confine: true, ...CHART_TOOLTIP },
+  series: [{ itemStyle: { color: PEAK } }],
+};
+```
+
+**Tests**: For stats chart styling changes, run `npx tsc --noEmit` and manually verify the charts in at least one light theme and one dark theme.
+
+### Convention: Settings pages use Mantine controls for the new visual shell
+
+**What**: Inside the current settings shell, prefer Mantine `Card`, `Stack`, `Group`, `TextInput`, `Select`, `Switch`, `SegmentedControl`, `Button`, `Modal`, and `Badge` for standard settings controls. Keep custom Tailwind/CSS compositions only for specialized visual content such as terminal theme swatches, previews, path rows, and compact status summaries.
+
+**Why**: Mixed custom shadcn-style controls and Mantine controls create inconsistent spacing, selected states, focus states, and modal behavior across settings pages. Using Mantine for the standard controls keeps the settings experience visually consistent without changing application state contracts.
+
+**Example**:
+
+```tsx
+<Card className="ui-surface-card" p="md">
+  <Stack gap="md">
+    <Select
+      label="默认 Shell"
+      value={shellSelectValue}
+      data={shellOptions}
+      allowDeselect={false}
+      onChange={(value) => {
+        if (value) void update("defaultShell", value);
+      }}
+    />
+    <Switch
+      color="cliPrimary"
+      checked={enabled}
+      onChange={(event) => void update("someSetting", event.currentTarget.checked)}
+    />
+  </Stack>
+</Card>
+```
+
+**Contracts**:
+
+- Do not rename `SettingsTab` ids for a visual-only migration.
+- Do not rename persisted settings store fields or alter storage schema.
+- Do not change Tauri command names or payloads while only updating settings visuals.
+- Keep page-level search behavior only on tabs that actually consume `searchValue`.
+
+**Tests**: For settings visual migrations, run `npx tsc --noEmit` and `npm run build`; desktop runtime UI verification remains manual.
+
+---
+
+## Common Mistakes
+
+### Convention: Visible terminal panes use non-layout marker overlays
+
+**What**: The active visible Pane uses a focus color mixed from the current terminal muted and background colors, while the active main-session Tab may override it with persisted Hook done, failed, or attention colors. Render marker lines as an absolute, pointer-transparent overlay; never use layout borders, shadows, animation, or xterm remounting.
+
+**Contracts**:
+
+- Resolve Hook state from the active Tab's Hook source only. Shell lifecycle status must not create Pane status colors.
+- Render markers only when the current visible layout contains more than one Pane. A single Pane with multiple Tabs renders no focus or Hook marker; a fullscreen Pane from an underlying split layout remains eligible.
+- Focused markers use 2 px at full opacity. Background done, failed, or attention markers use 1 px at 50% opacity; background running renders nothing.
+- Hidden Workspans and fullscreen-excluded or filtered-out Pane layouts render no marker. Existing Workspan summary dots remain authoritative for hidden layouts.
+- Window blur, document hiding, minimize, and tray transitions remove focus emphasis but preserve background Hook markers.
+- PTY, file-editor, and subagent-transcript Pane kinds receive focus emphasis. Only the main PTY session receives Hook status colors.
+- Marker overlays must be children of `.ui-terminal-pane-content`, so every style starts at the terminal content boundary and never wraps the Pane Tab bar.
+- The `tab-top` style keeps a full-width top line and limits both side lines to `2%` of the content height. The `full` style keeps full-height sides and a bottom line.
+- The settings style chooser must show a compact two-Pane terminal and mount the production `.ui-terminal-pane-marker` overlay only inside the active Pane content. Do not duplicate marker geometry in preview-only elements. Its Pane content must flex into the space left by the fixed header so the full marker bottom edge is not clipped. The compact preview may override `--terminal-pane-marker-side-height` with a visible pixel length while production keeps the `2%` fallback. Keep the style-card border neutral so it cannot overlap the marker preview; express selection with `aria-pressed`, a subtle primary-tinted background, primary label text, and a visible check. Done, failed, and attention colors must be keyboard-selectable preview options; both style previews use the selected option's live color, and focusing or opening a color input selects its option without persisting preview-only state.
+- Settings sanitize the enabled state, style, and each `#RRGGBB` color independently, default to disabled behavior, persist through `settingsStore`, and participate in preference sync.
+
+```typescript
+type TerminalPaneMarkerStyle = "full" | "tab-top";
+
+interface TerminalPaneMarkerSettings {
+  enabled: boolean;
+  style: TerminalPaneMarkerStyle;
+  doneColor: string;
+  failedColor: string;
+  attentionColor: string;
+}
+```
+
+**Validation matrix**:
+
+- Missing settings object or missing/invalid `enabled` -> use the complete default object and disable marker behavior.
+- Explicit `enabled: true` -> preserve the existing marker behavior; disabling must retain style and color preferences.
+- Visible Pane count <= 1 -> render no marker, regardless of Tab count or Hook status.
+- Default focus color -> mix terminal muted 60% with terminal background 40%; default done color -> `#8FBF7F`; failed and attention keep their independent defaults.
+- Removed legacy `tab-frame` or any invalid style -> fall back only `style` to `tab-top`.
+- Invalid color or a value outside exact `#RRGGBB` syntax -> fall back only that color.
+- Valid lower-case hex -> normalize it to upper case.
+
+**Good/Base/Bad cases**:
+
+- Good: a focused Pane with `attention` uses the approval color at 2 px/full opacity.
+- Base: an unfocused Pane with Hook `running` has no marker; if the app is focused, only the active Pane keeps the default focus line.
+- Bad: mounting the overlay under `.ui-terminal-pane`, because `inset: 0` then includes the Pane Tab bar; reading merged `tabNotifications` is also invalid because ordinary Shell completion could look like an Agent Hook result.
+
+```tsx
+// Wrong: changes layout and consumes merged Shell/Hook state.
+<div style={{ borderColor: statusColor }} data-status={tabNotifications[activeId]} />
+
+// Correct: resolve the active Tab's Hook source, then overlay pointer-transparent lines.
+const marker = resolveTerminalPaneMarker({ hookStatus: tabStatuses[activeId]?.hook ?? "none", ...state });
+```
+
+**Tests**: Run `node scripts/terminalPaneMarker.test.mjs`, `node scripts/terminalWorkspan.test.mjs`, `node scripts/terminalHookBinding.test.mjs`, and `npx tsc --noEmit`. Manually verify all marker styles, hidden Tab bars, nested horizontal/vertical splits, Pane fullscreen, Workspan switching, scoped filtering, window blur/minimize/tray restore, and supported CLI Hook events.
+
+### Common Mistake: Setting only `borderColor` on Mantine selection cards
+
+**Symptom**: A settings option card looks borderless even though it has Tailwind `border` or a shared class such as `ui-selection-card`.
+
+**Cause**: Mantine component styles can reset the button/card border after app CSS is bundled, especially on `UnstyledButton`. Setting only `borderColor` does not restore border width/style when the shorthand `border` has been reset to `0`.
+
+**Fix**: Put the full border contract in the shared class and make it specific enough to beat Mantine's base selector:
+
+```css
+.ui-selection-card,
+.ui-selection-card.ui-selection-card {
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+}
+```
+
+Selected variants may keep overriding `border-color`, but the base rule must own width and style.
+
+**Prevention**: When a Mantine-backed settings card appears borderless, inspect the computed `border-width` and `border-style` before changing colors.
+
+### Gotcha: Keep the xterm 6.1 Beta DOM character-measure fallback hidden
+
+**Symptom**: A terminal opened in an older WebView shows 32 uppercase `W` characters above the canvas.
+
+**Cause**: `@xterm/xterm` `6.1.0-beta.288` falls back from `OffscreenCanvas` font metrics to a DOM span when the WebView does not expose `fontBoundingBoxAscent` and `fontBoundingBoxDescent`. The fallback span contains `"W".repeat(32)`, but that beta package removed the `.xterm-char-measure-element` hiding rule from its bundled CSS.
+
+**Contract**: While this xterm version remains pinned, `src/App.css` must keep a scoped `.xterm .xterm-char-measure-element` rule with `visibility: hidden`, absolute positioning, and offscreen placement. Keep `display: inline-block`; `display: none` would make `offsetWidth` and `offsetHeight` zero and break cell measurement.
+
+**Wrong**:
+
+```css
+.xterm .xterm-char-measure-element {
+  display: none;
+}
+```
+
+**Correct**:
+
+```css
+.xterm .xterm-char-measure-element {
+  display: inline-block;
+  visibility: hidden;
+  position: absolute;
+  top: 0;
+  left: -9999em;
+  line-height: normal;
+}
+```
+
+**Tests**: Statically assert that the complete rule remains in `src/App.css`; manually verify an older macOS WebView shows no measurement text and that terminal columns, IME placement, file-link hover icons, and normal glyph alignment remain correct.
+
+### Gotcha: xterm.js `allowTransparency` is a construction-time option
+
+**Symptom**: After toggling a "transparent background" feature on a live `Terminal` instance, the background stays opaque even though `theme.background` was updated to `rgba(...)`.
+
+**Cause**: Per `node_modules/@xterm/xterm/typings/xterm.d.ts`:
+
+> `allowTransparency` must be set before executing the `Terminal.open()` method and can't be changed later without executing it again.
+
+If you write `terminal.options.allowTransparency = true` at runtime, the option silently does nothing.
+
+**Wrong**:
+
+```tsx
+const terminal = new Terminal({ /* ...no allowTransparency... */ });
+// Later, when user enables background image:
+terminal.options.allowTransparency = true;        // ❌ no-op
+terminal.options.theme = { background: "rgba(0,0,0,0)" };  // ❌ still opaque rendering
+```
+
+**Correct**:
+
+```tsx
+const terminal = new Terminal({
+  // ...
+  allowTransparency: true,   // ✅ set once, unconditionally
+  theme: getInitialTheme(),
+});
+// Later, swap only theme.background between opaque HEX and rgba:
+terminal.options.theme = isTransparent ? applyTransparency(theme) : theme;
+```
+
+**Why "always on" instead of "rebuild the Terminal on toggle"**: Rebuilding loses scrollback, breaks the PTY data stream wiring, and incurs ~50 ms of GPU/font setup. xterm's WebglAddon is alpha-capable (`alpha: true` is the default WebGL context flag), so the cost of `allowTransparency: true` is a small constant per-frame — research measured ~5-10% FPS in pathological cases, imperceptible in normal terminal use.
+
+**Reference**: `src/features/terminal/index.ts` — sets `allowTransparency: true` unconditionally; the hot-update `useEffect` only swaps `terminal.options.theme` via `applyTransparency` helper in `src/shared/lib/terminalThemes.ts`.
+
+**Contrast contract**: Transparent terminal background compositing must be theme-brightness aware. Dark terminal themes may use black alpha for the xterm cell background and image overlay, but light terminal themes must use white alpha so muted ANSI text stays readable. Light terminal themes should avoid WebGL because its glyph rendering and alpha compositing can make glyph edges look soft on bright surfaces even without a background image. Do not increase xterm `fontWeight` as a contrast fix; it can change cell metrics and make glyphs collide in light themes. Keep xterm's measured font and rendered font aligned: if global UI font CSS touches `.xterm`, route it through `--terminal-font-family` from `XTermTerminal` instead of `revert` or a hard-coded stack. Keep the decision centralized in `src/shared/lib/terminalThemes.ts` helpers such as `isLightTerminalTheme`, `applyTransparency`, `getTerminalBackgroundOverlayColor`, and `getTerminalMinimumContrastRatio`; do not hardcode `rgba(0,0,0,...)` in `XTermTerminal` or terminal background CSS.
+
+**Prevention checklist when wiring a new xterm appearance feature**:
+
+- [ ] Does the feature need a non-opaque background, an alternate cursor blink, or any other "must-set-at-construction" xterm option?
+- [ ] If yes, set it unconditionally at `new Terminal(...)` — do NOT gate it on the feature toggle.
+- [ ] Read the JSDoc on every option you set; xterm marks construction-time options explicitly.
+- [ ] When in doubt, grep `typings/xterm.d.ts` for "can't be changed later" / "must be set before".
+
+### Common Mistake: Recreating the Terminal on settings change
+
+**Symptom**: Toggling a terminal-related setting (font family change, background enable) causes the terminal to flash blank, lose scrollback, and re-prompt.
+
+**Cause**: The construction `useEffect` lists a settings field in its dependency array, so changing that field disposes and recreates the Terminal.
+
+**Fix**: Keep the construction effect's deps as `[sessionId]`. Add a separate hot-update effect that mutates `terminal.options.*` for the changed setting. xterm supports hot-mutating `fontSize`, `fontFamily`, `theme`, `cursorBlink`, `cursorStyle`, `scrollback` without rebuild. Only `allowTransparency`, `cols`/`rows` (use Fit instead), and `rendererType` (legacy) require rebuild.
+
+### Common Mistake: Treating Codex half-screen scrolling as a scrollbar bug
+
+**Symptom**: After shell output such as `dir`, starting Codex leaves the old output visible above Codex, while Codex scrolls only in the lower part of the terminal. Increasing terminal font size may make the outer scrollbar reappear, but that is only exposing the same state more clearly.
+
+**Cause**: Codex is launched from the current shell cursor position instead of a clean viewport. The problem is the pre-launch screen state, not xterm scrollbar CSS, Codex `--no-alt-screen`, `TERM=dumb`, or terminal recreation.
+
+**Fix**: Before direct Codex launches, send form feed (`\x0c`, Ctrl+L) to the PTY, then execute the command. Apply this to both automatic startup commands and manually typed direct `codex` commands on Enter. Keep the match narrow: direct commands such as `codex`, `codex.cmd`, `codex.exe`, and `codex.ps1` only.
+
+**Wrong**:
+
+```typescript
+invoke("pty_write", { sessionId, data: `${command}\r` });
+```
+
+**Correct**:
+
+```typescript
+const clearBeforeLaunch = isDirectCodexStartupCommand(command) ? "\x0c" : "";
+invoke("pty_write", { sessionId, data: `${clearBeforeLaunch}${command}\r` });
+```
+
+**Prevention**: When a TUI appears to scroll inside a partial screen, reproduce with prior shell output still visible. If old output remains above the TUI, fix the launch input sequence before changing scrollbar styles, TERM, alternate-screen flags, or xterm construction.
+
+### Common Mistake: Making user-facing clear screen depend on only one side of the PTY boundary
+
+**Symptom**: Calling `terminal.clear()` makes IME candidate windows open at the old pre-clear cursor position. Sending only Ctrl+L works at an idle shell, but right-click clear does nothing while a foreground process such as `tail -f` owns the PTY and ignores that byte.
+
+**Cause**: `terminal.clear()` mutates the xterm buffer directly without parser cursor events, while Ctrl+L is only PTY input and cannot require every foreground process to implement shell clear behavior. The display must clear locally through xterm's parser, then the process may redraw through the existing input path.
+
+**Fix**: Enqueue ED2 + cursor-home before sending Ctrl+L. This gives the emulator an immediate, process-independent clear and still lets a cooperating shell or TUI redraw its own prompt or screen.
+
+**Wrong**:
+
+```tsx
+terminal.clear();
+terminal.focus();
+
+// Ctrl+L alone is ignored by foreground programs such as tail -f.
+terminalProcessManager.write(sessionId, "\x0c");
+```
+
+**Correct**:
+
+```tsx
+useTerminalStore.getState().markAttentionInputHandled(sessionId);
+enqueueActiveWrite("\x1b[2J\x1b[H");
+terminalProcessManager.write(sessionId, "\x0c");
+focusTerminalWithCodexCursorPolicy(terminal);
+```
+
+**Prevention**: For user-facing terminal clear actions, enqueue ED2 + cursor-home through the normal xterm write parser so foreground-process behavior cannot block the clear, then send Ctrl+L (`\x0c`) so shells and TUIs can redraw. Do not add ED3: context-menu clear preserves scrollback. Reserve `terminal.clear()` for internal buffer maintenance where IME/helper textarea position is irrelevant.
+
+**Tests**: Run `node --test scripts/terminalContextMenuClear.test.mjs scripts/terminalImeComposition.test.mjs` and `npx tsc --noEmit`; manually verify an idle shell, `tail -f`, a full-screen TUI, scrollback retention, and IME input after clearing.
+
+### Convention: Keep application cursor visibility sequences intact by default
+
+**Contract**: PTY output passes DECTCEM sequences (`CSI ?25h` show cursor and `CSI ?25l` hide cursor) through unchanged for every CLI. When the opt-in `hideCodexRuntimeCursor` setting is enabled and the active terminal is identified as Codex, the Codex display transform may delay `CSI ?25h` by 80ms; `CSI ?25l` remains immediate. Codex identity must be latched from immutable session metadata, the visible TUI viewport, or the current output frame before cursor filtering is decided.
+
+**Why**: Other TUIs own cursor visibility and must keep native behavior. The compatibility switch restores the pre-V1.3.0 Codex workaround without changing Shell, Claude, Pi, or disabled-setting sessions.
+
+**Prevention**: Keep the suppression at the display transform boundary, preserve raw PTY frame lengths for ACK accounting, latch first-frame Codex signatures before filtering, reapply hidden state after xterm focus, cancel pending show timers on teardown or disable, and do not create a visual cursor overlay or alter PTY input.
+
+**Tests**: Run `node --test scripts/terminalPiCompatibility.test.mjs scripts/terminalNewlineShortcut.test.mjs` and `npx tsc --noEmit`. Assert the shared transform keeps Pi behavior and the Codex cursor filter is guarded by `hideCodexRuntimeCursor` plus Codex session detection.
+### Common Mistake: Letting xterm helper textarea follow non-IME redraw cursors
+
+**Symptom**: During TUI redraws, including but not limited to Claude Code `/compact`, the hidden input proxy appears to make the terminal input anchor jump with a non-input cursor, often the tail/status line.
+
+**Cause**: xterm syncs `.xterm-helper-textarea` to the terminal cursor on cursor moves. This is required for IME composition, but outside composition it can create browser scroll/anchor churn during progress-bar redraws.
+
+**Fix**: In `XTermTerminal`, keep the helper textarea pinned to xterm's offscreen default while not composing, but keep it at least `1x1`; xterm's IME fallback for active-IME punctuation reads textarea diffs after keyCode 229, and some IMEs drop the first character when the helper textarea is `0x0`. During IME composition, anchor `.composition-view` and `.xterm-helper-textarea` to xterm's current `buffer.active.cursorX/cursorY` when that cursor is inside a recognized input region. That live cursor has priority over inverse-rendered cells: a TUI may use inverse attributes for a model selector or status field, so scanning for an arbitrary inverse cell is not cursor detection. If a TUI redraw moves the cursor to a status/progress row during composition, fall back to the nearest visible prompt row instead of blindly trusting that redraw cursor. Prompt recognition must include Codex's `›` prompt in addition to common shell prompts such as `>`, `$`, `#`, and `PS>`. Do not scan only the bottom rows or force a bottom-row fallback: real input can sit above the bottom while the IME candidate window still needs to follow the visible input row. Reapply the frozen composition anchor after xterm render events, because xterm's own `CompositionHelper.updateCompositionElements()` can rewrite `.composition-view` and helper textarea positions from the live buffer cursor. xterm also calls `_syncTextArea()` from cursor moves, resize, and its own `compositionstart` listener. Windows IMEs may read and lock the helper-textarea geometry after an unmodified keyCode 229 Process key but before `compositionstart`; therefore the capture-phase Process-key handler must synchronously re-pin through the CLI-specific composition and textarea resolvers. A RAF, timeout, or compositionstart-only correction is too late for the native candidate window. When resize fires outside composition, immediately and on the next animation frame re-pin the idle helper through the CLI-specific `resolveTextareaAnchor`; otherwise the next Windows IME session can start from a TUI status cursor. When resize fires during composition, invalidate the frozen row/column anchor before reapplying it because xterm reflow makes old viewport-relative coordinates invalid. After `compositionend`, pin the helper textarea again.
+
+**Pi exception**: Pi draws its editor cursor as an inverse cell inside paired horizontal rules while its hardware cursor can remain at the right edge of the same editor row. Within a validated Pi editor region, the inverse software cursor therefore has priority over the hardware cursor. Inverse cells outside that region are ignored, and the hardware cursor remains the fallback when no inverse cell is visible. Returning the stale right-edge cursor makes xterm calculate both `left` and `maxWidth` from the last column, which moves raw pinyin to the right and clips it to one letter. Consecutive Windows compositions can also start before Pi renders the previous committed candidate. Only an active Pi compatibility controller may opt into re-resolving the frozen anchor on composition update, xterm render, and cursor move; generic Shell/Claude/Codex composition anchors remain frozen so status redraw cursors cannot move them.
+
+> **Unresolved limitation (2026-07-30)**: These contracts pass synthetic tests but do not resolve the real Windows Pi second-composition drift. Do not treat Process-key re-pinning, inverse-cursor priority, or render-time refresh as a confirmed end-to-end fix. Future work must capture the real native `keydown 229 → compositionstart/update/end → xterm timers → Pi PTY redraw` order and textarea/composition-view geometry from a failing session before adding another fallback.
+
+```typescript
+// Wrong: a stale hardware cursor inside the editor hides Pi's visible software cursor.
+if (containsRow(region, cursor.y)) return cursor;
+return findInverseAnchor(terminal, region);
+
+// Correct: only Pi's validated editor region grants inverse-cursor priority.
+const inverseAnchor = findInverseAnchor(terminal, region);
+if (inverseAnchor) return inverseAnchor;
+if (containsRow(region, cursor.y)) return cursor;
+```
+
+**Composition-end timing**: xterm intentionally reads the final helper-textarea value from its own `setTimeout(0)` after `compositionend`, because WebKit/Chromium can update the committed candidate after the event listeners return. The application IME listener must defer helper-textarea re-anchoring, scroll restoration, and `scheduleFit(true)` to a later timer registered after xterm's listener. Cancel that deferred cleanup if another composition starts or the controller is disposed. Mutating textarea geometry synchronously in `compositionend` can make WKWebView commit only the final raw pinyin character.
+
+**Correct**:
+
+```tsx
+if (!isComposingRef.current) {
+  textarea.style.left = "-9999em";
+  textarea.style.top = "0px";
+  textarea.style.width = "1px";
+  textarea.style.height = "1px";
+  textarea.style.lineHeight = "1px";
+}
+```
+
+**Wrong**:
+
+```tsx
+// Do not hide, remove, or disable the helper textarea.
+textarea.style.display = "none";
+```
+
+**Tests / manual checks**:
+
+- [ ] TUI redraws, with or without Claude Code `/compact`, do not make the input anchor jump.
+- [ ] Chinese/IME composition text and the candidate window stay near the visible input cursor, including when the input row is not at the bottom.
+- [ ] Fullscreen, split, and resize operations re-pin the idle helper before the next composition; inverse status fields do not move composition text, and reflow does not retain stale composition rows.
+- [ ] After xterm rewrites the helper textarea to a status cursor, an unmodified helper-textarea keyCode 229 synchronously restores the CLI anchor before `compositionstart`, without waiting for RAF or timeout.
+- [ ] In a Pi editor with a stale right-edge hardware cursor and a left-side inverse software cursor, composition `left` and `maxWidth` derive from the inverse cursor; without an inverse cursor, the in-region hardware cursor remains the fallback.
+- [ ] When a second Pi composition initially freezes at the right edge, the next Pi render/cursor event refreshes `left` and `maxWidth` from the visible editor cursor; the same event does not unfreeze non-Pi composition anchors.
+- [ ] If a TUI status/progress redraw owns the current cursor during composition, the candidate window falls back to the nearest visible prompt row.
+- [ ] Normal keyboard input, Enter, and paste still reach the PTY.
+- [ ] Chinese/IME composition still positions the candidate window correctly.
+- [ ] `node --test scripts/terminalImeAnchor.test.mjs scripts/terminalImeComposition.test.mjs` confirms real-cursor priority, prompt fallback, Process-key synchronous re-pinning, resize invalidation, composition cleanup ordering, and cancellation for a new composition/disposal.
+
+### Convention: Deduplicate macOS IME input at the shared forwarding boundary
+
+**What**: Keep terminal-input de-duplication in the one shared PTY forwarding path. Preserve the existing 80 ms exact cross-source rule for xterm onData versus native-text recovery. For macOS only, allow the IME controller to arm a short Process-key checkpoint from a helper-textarea keydown(229); while that checkpoint is live, reject only an exact non-ASCII onData re-emission.
+
+**Why**: WebKit IMEs can deliver input before keydown(229). xterm may emit that CJK payload directly and then emit it again from its deferred helper-textarea diff fallback. Both producer paths then look like onData, so a source-only rule cannot see the duplicate. PTY-side filtering is too late because it loses the browser event boundary and can erase intentional repeated input.
+
+**Contracts**:
+
+- The forwarding controller owns the last accepted payload and Process-key checkpoint; individual CLI views, PTY code, and output transforms must not implement competing text filters.
+- The IME DOM controller notifies the forwarding controller only after verifying that the Process key came from xterm's helper textarea. A new composition start clears the checkpoint.
+- Same-source matching is macOS-only, non-ASCII-only, exact-payload-only, and expires within the existing 400 ms Process-key recovery horizon. It must not become a general recent-input history filter.
+- A new composition must allow an intentional second commit of the same Chinese text. Windows, Linux, normal ASCII input, Enter, Backspace, paste, and the native recovery path retain their existing behavior.
+
+**Tests**: Run node --test scripts/terminalImeInputDedup.test.mjs scripts/terminalImeComposition.test.mjs and npx tsc --noEmit. Cover cross-source de-duplication, input-before-229 same-source re-emission, accumulated deferred payloads, composition reset, expiration, and disabled-platform behavior.
+
+### Common Mistake: Estimating xterm IME cell size from container bounds
+
+**Symptom**: IME candidate popup or composition caret drifts on secondary monitors, mixed-DPI displays, or after display-scale changes even though the terminal prompt row detection is correct.
+
+**Cause**: `getBoundingClientRect().width / terminal.cols` and `height / terminal.rows` are only rough estimates of the rendered cell size. On xterm, the real cell metrics come from the render service and can differ slightly due to font measurement, renderer rounding, and DPI scaling. Those small errors accumulate across columns/rows and move the helper textarea away from the real caret.
+
+**Fix**: When anchoring `.xterm-helper-textarea` or `.composition-view`, read xterm's rendered dimensions first and only fall back to DOM estimation if the internal metrics are unavailable.
+
+```tsx
+const renderedCell = (
+  terminal as typeof terminal & {
+    _core?: {
+      _renderService?: {
+        dimensions?: {
+          css?: { cell?: { width?: number; height?: number } };
+        };
+      };
+    };
+  }
+)._core?._renderService?.dimensions?.css?.cell;
+
+const width = renderedCell?.width ?? fallbackWidth;
+const height = renderedCell?.height ?? fallbackHeight;
+```
+
+**Prevention**:
+
+- [ ] For xterm cursor / IME positioning, prefer `_core._renderService.dimensions.css.cell`.
+- [ ] Keep DOM `getBoundingClientRect()`-based division only as fallback.
+- [ ] After changing IME anchoring, manually verify primary-screen and secondary-screen input behavior.
+
+### Gotcha: xterm `write` is asynchronous for buffer cursor reads
+
+**Symptom**: IME fallback cursor sampling still occasionally anchors to a Claude/Codex status or animation row even though sampling waits for a short quiet period after output.
+
+**Cause**: `terminal.write(data)` queues parser work; `terminal.buffer.active.cursorX/cursorY` is not guaranteed to reflect that write until the optional write callback fires. Starting a quiet-cursor sample before the callback can still sample the pre-write or mid-redraw cursor.
+
+**Fix**: Any cursor-dependent logic that is caused by PTY output must be scheduled from the `terminal.write(..., callback)` callback. Guard stale callbacks if the terminal instance can be disposed.
+
+```tsx
+const writeTerminalChunk = (chunk: string) => {
+  terminal.write(chunk, () => {
+    if (terminalRef.current !== terminal) return;
+    noteTerminalWriteActivity();
+  });
+};
+```
+
+**Prevention**: When reading `terminal.buffer.active` after output writes, first check xterm's `write` callback contract. Do not use timers started before `terminal.write()` as evidence that the buffer cursor has already parked at the input caret.
+
+### Common Mistake: Rewriting ANSI when the bug is already in xterm buffer attrs
+
+**Symptom**: A TUI row, such as the Claude/Codex composer on a light terminal theme, keeps a stale dark background even after filtering likely SGR background sequences from the raw PTY stream.
+
+**Cause**: The raw stream is only one input to xterm. After xterm parses control sequences, the visible state is stored on buffer cells. If the app repaints the composer or uses a sequence form the filter did not cover, pre-parse ANSI rewriting becomes guesswork and misses the actual rendered cell attributes.
+
+**Fix**: For narrow TUI rendering fixes, run correction from the `terminal.write(data, callback)` callback, locate the visible prompt row through `terminal.buffer.active`, mutate only the known bad cell attribute, then call `terminal.refresh(row, row)`.
+
+```tsx
+terminal.write(chunk, () => {
+  if (terminalRef.current !== terminal) return;
+  normalizeTuiPromptBackground(terminal);
+});
+```
+
+When using xterm internals, keep the hack small and version-scoped. xterm 6 exposes a read-only public `IBufferLine`, but the runtime `BufferLineApiView` keeps the mutable line on `_line`. Clear only the visual field styling when the theme/background mode makes stale TUI fields harmful, such as light themes or active terminal background-image transparency: explicit background color bits (`0x03ffffff`) and, only when inverse spans a wide part of a known bad row, the inverse flag (`0x04000000`). Do not clear isolated inverse cells; those may be the TUI caret.
+
+```tsx
+const mutableLine = (line as IBufferLine & { _line?: MutableLine })._line;
+mutableLine.loadCell(x, cell);
+cell.bg &= ~0x03ffffff;
+if (lineHasWideInverse) cell.fg &= ~0x04000000;
+mutableLine.setCell(x, cell);
+terminal.refresh(row, row);
+```
+
+**Prevention**: Do not keep broadening ANSI filters after the first miss. If the defect is a visual xterm cell state, inspect or correct `terminal.buffer.active` after the write callback. Gate the fix narrowly by theme brightness and prompt signature, not only by shell/tool name; Claude and Codex can emit similar composer styling through different shells. Codex may put the dark field on the row immediately before the visible `›` prompt, so include a small prelude range when normalizing prompt rows. Submitted prompt rows can move to the upper visible viewport after output arrives, so scan the whole visible viewport, not only the bottom prompt area. Tab restore and resize can trigger an xterm repaint after React visibility effects; coalesce a post-`onRender` normalization with `requestAnimationFrame` so restored tabs do not redraw stale composer backgrounds.
+
+For terminal background images, active transparency mode is an appearance-mode gate equivalent to theme brightness. Keep prompt detection narrow, but do not block normalization only because the terminal theme is dark; dark themes can still expose stale explicit backgrounds as opaque boxes over the image.
+
+If a CLI draws large opaque panels or status rows over a terminal background image, remember that CLI themes only affect which ANSI colors are emitted; they do not make ANSI background cells transparent. For known full-screen AI TUIs such as Claude/Codex, the background-image mode may clear explicit background attrs and wide inverse regions across the visible viewport. Preserve isolated inverse cells because Claude can use one as its software input cursor. Keep that broad pass gated by active transparency plus the known TUI session or a visible TUI signature; use the narrower prompt-row correction for unknown tools.
+
+Do not keep WebGL enabled while a terminal background image is active. The default renderer is the safer path for transparent backgrounds and xterm buffer-attr corrections; WebGL can preserve or redraw opaque TUI cells in ways that make Codex/Ratatui panels appear as black blocks.
+
+On a light terminal theme, a CLI that renders with its own dark theme paints message blocks that outlive every prompt-row heuristic: the submitted prompt scrolls up out of the composer area, and the Claude light-theme pass only covers patch rows plus the app-owned slash-menu highlight. Erase those blocks by resolved cell color instead of by row shape:
+
+- Gate the pass on theme brightness plus session identity (a Claude or Pi context), and accept a latched AI TUI signature as the plain-shell fallback for a CLI started by hand. Never require the latch: the welcome banner that sets it scrolls away while the black block keeps coming back.
+- Resolve what xterm will actually paint before judging a cell: RGB attrs directly, palette attrs through the active theme's ANSI entries with the xterm 256 cube and gray ramp as fallback, and never default-background cells — the terminal theme owns those, no CLI does.
+- Clear only near-neutral dark backgrounds (relative luminance <= 0.28 and chroma <= 96) so colored badges, diff markers, and light selection highlights survive the pass.
+- Require several dark cells on the row (>= 4). A one- or two-cell dark background is a TUI block cursor, not a painted block.
+- Do not clear the foreground here. Light themes run with `minimumContrastRatio: 6`, so xterm re-derives a readable foreground once the dark background is gone; clearing it would also discard configured TUI user/assistant colors.
+
+### Convention: Terminal-side preview panels share one theme resolver
+
+**What**: The Markdown preview, subagent transcript, session replay, and the in-terminal Git diff viewer resolve their colors through `useTerminalPreviewTheme()` (backed by `src/shared/lib/terminalPreviewTheme.ts`). Panels must not call `getTerminalTheme()` / `isLightTerminalTheme()` themselves, and must not read `terminalThemeName` + the two palettes to re-derive brightness.
+
+**Why**: These panels follow the terminal theme by default but can be pinned to an independent preset (`terminalPreviewThemeName`, `follow-terminal` when unset). Every panel that judges brightness on its own drifts out of the family the first time that setting is used — and one of them silently kept following the *app* theme for code blocks before this was centralized.
+
+**Contracts**:
+
+- `resolveTerminalPreviewTheme()` owns the follow-vs-independent decision, brightness, and the panel CSS variable scope. Anything that is not a known preset id — a stale value from settings sync, a renamed preset — resolves to "follow the terminal", never to a broken panel.
+- A panel re-themes its subtree by putting `panelStyle` on its own root, not by writing global `--term-panel-*`. `App.tsx` keeps owning the global variables for terminal-side chrome (stats, providers, resources, tab bar); those must not move with the preview theme.
+- `TERM.*` from `termStatsUi` are `var(--term-panel-*)` references, so the local scope is enough — do not resolve colors in JS and inline them.
+- The terminal's custom text-color override applies only while following the terminal; an independently chosen preset keeps its own foreground.
+- Code-block brightness comes from the resolver's `tone`. When a caller needs the terminal code theme without terminal link behavior, pass `linkBehavior="preview"` explicitly — `MarkdownContent` derives it from `variant` otherwise.
+- The settings library grid is one component (`TerminalThemePresetGrid`); tone filtering, search, and the terminal library's auto/system special case stay in the host section.
+
+**Tests**: `node --test scripts/terminalPreviewTheme.test.mjs scripts/gitDiffThemeWorkflow.test.mjs` plus `npx tsc --noEmit`; manually verify follow mode against a light and a dark terminal theme, then an independent preset of the opposite brightness across all four panels.
+
+### Convention: Click-based terminal cursor relocation is unsupported
+
+**What**: Clicking terminal content does not reposition the PTY line-editor cursor. The application must not register a click handler that emits cursor-movement sequences.
+
+**Why**: Rendered xterm coordinates are not a reliable representation of shell or TUI input state. Enabling this behavior desynchronizes the visible caret, the PTY line editor, and TUI-owned input boxes.
+
+**Tests**: Verify normal click-to-focus and mouse text selection still work. Do not add a click-to-caret acceptance test because cursor relocation is intentionally absent.
+
+### Convention: Mouse-aware TUIs receive unmodified mouse reports
+
+**What**: xterm instances must use the shared `TerminalMouseInteraction` policy. When a PTY application enables mouse reporting, ordinary click, drag, and move events go to that application; users hold Shift to select terminal text. This is separate from the unsupported click-to-caret behavior above.
+
+**Why**: Full-screen TUIs such as Grok render their own scrollback and scrollbar inside terminal cells. Setting `mouseEventsRequireAlt: true` makes those controls look clickable while silently withholding the mouse reports unless Alt is held. Wheel events are unaffected, which can hide the mismatch during testing.
+
+**Correct**:
+
+```tsx
+const terminal = new Terminal({
+  ...createTerminalMouseInteractionOptions(),
+});
+```
+
+**Wrong**:
+
+```tsx
+const terminal = new Terminal({
+  mouseEventsRequireAlt: true,
+});
+```
+
+**Contracts**:
+
+- Keep the policy generic; do not detect Grok or another CLI by process name.
+- A shell that has not enabled mouse reporting keeps normal xterm text selection behavior.
+- A mouse-aware TUI receives ordinary mouse reports; Shift remains the selection modifier.
+- Mouse policy belongs in `src/features/terminal/browser/TerminalMouseInteraction.ts`; `XTermTerminal` only assembles it.
+
+**Tests**: Run `node --test scripts/terminalMouseInteraction.test.mjs` and `npx tsc --noEmit`; manually verify Grok fullscreen click/drag/wheel, Shift+drag selection in a mouse-aware TUI, and ordinary shell selection.
+
+### Convention: xterm Windows PTY and paste handling
+
+**What**: Internal xterm instances backed by the app's Windows PTY must use xterm's Windows compatibility and native paste path.
+
+**Why**: ConPTY resize/reflow can make PowerShell output appear to vanish after fit/tab changes. Custom paste handlers that write directly to `pty_write` bypass xterm's CR normalization and bracketed paste markers, so TUIs such as Claude Code may treat multi-line paste as typed Enter events.
+
+**Correct**:
+
+```tsx
+const terminal = new Terminal({
+  scrollOnEraseInDisplay: true,
+  windowsPty: { backend: "conpty" },
+});
+
+const pasteIntoTerminal = (text: string) => {
+  terminal.paste(text);
+};
+
+terminal.onData((data) => {
+  invoke("pty_write", { sessionId, data });
+  // If command history needs pasted text, strip complete bracketed-paste
+  // wrappers only for history; never rewrite data before sending it to PTY.
+});
+```
+
+**Wrong**:
+
+```tsx
+const data = text.replace(/\r\n?/g, "\n");
+invoke("pty_write", { sessionId, data });
+```
+
+**Contracts**:
+
+- Browser paste, keyboard/menu paste, in-app file drag, and native WebView file drop belong to the Input controller and must converge on one `terminal.paste()` path.
+- `attachPasteAndDrop()` owns its DOM listeners, drop-zone registration, and native drag-drop unlisten callback; its returned cleanup must release all of them, including an unlisten callback that resolves after cleanup begins.
+- File/image paths are formatted for the resolved shell before native paste; do not bypass shell quoting by writing the raw path directly to the PTY.
+
+**Tests / manual checks**:
+
+- [ ] Windows 10 + PowerShell retains scrollback after tab switch / resize / fit.
+- [ ] Claude Code multi-line paste preserves line order and is not submitted line-by-line.
+- [ ] CMD still accepts normal paste and Enter behavior.
+- [ ] Browser text/image paste, app-internal file drag, and system file drop all focus the intended visible terminal only once.
+
+### Scenario: File path actions and cross-project terminal drag
+
+#### 1. Scope / Trigger
+
+- Trigger: the file explorer or Git Changes tree sends a project file or directory to an in-app terminal through drag-and-drop.
+- Boundary: source rows use `useTerminalFilePointerDrag`; `terminalFileDrag` owns the in-memory/DataTransfer contract; `useTerminalInput` resolves the payload for the target terminal session.
+
+#### 2. Signatures
+
+- `formatRelativeProjectFilePath(relativePath, kind)` returns the normalized project-relative path.
+- `formatAbsoluteProjectFilePath(project, relativePath, kind)` joins the local project root or SSH `remote_path` with the relative path.
+- `TerminalFileDragProject` is the minimum project root accepted by `createTerminalFileDragPayload(project, relativePath, kind)`; it includes the project identity, local/remote roots, environment, SSH host, and CLI tool.
+- `TerminalFileDragPayload` contains `text`, `absolutePath`, and `source` (`id`, `path`, `remote_path`, `environment_type`, `ssh_host_id`).
+- `TERMINAL_FILE_DRAG_MIME` carries the serialized payload across the browser drag boundary.
+- A registered terminal drop zone accepts `paste(payload)`, not a pre-resolved string.
+- `useTerminalFilePointerDrag({ project, onDropOutsideTerminal? })` returns pointer handlers and the portal preview. Sources supply `{ path, kind }`.
+
+#### 3. Contracts
+
+- The file explorer and Git Changes tree may provide files and directories. Git rows must use `gitTreeProject`, whose root is the active Git repository rather than an enclosing project/worktree root.
+- File Explorer and Git Changes tree must share `useTerminalFilePointerDrag`; producers must not duplicate pointer threshold, preview, drop-zone, or click-suppression state.
+- The hook begins a drag only after `POINTER_DRAG_START_PX`, builds `TerminalFileDragPayload`, updates the registered terminal drop-zone point, and commits through `commitTerminalFileDragDrop()`.
+- File/directory-row action buttons (stage, discard, delete) are not drag handles. A completed pointer drag suppresses the source row's subsequent click once.
+- The source keeps the existing CLI-specific relative drag text for same-location drops.
+- The target compares the source location with its current project/worktree location using `isSameProjectFileLocation`.
+- Same project location uses `payload.text`; a different project, worktree, SSH host, or SSH remote root uses `payload.absolutePath`.
+- Local/WSL absolute paths use `project.path`; SSH absolute paths use `project.remote_path`.
+- The custom MIME payload is supplementary to `TERMINAL_FILE_PATH_MIME` and `text/plain`; older text-only drags remain accepted.
+
+#### 4. Validation & Error Matrix
+
+| Condition | Behavior |
+| --- | --- |
+| No source project, non-primary pointer, or modifier-held pointer | Do not begin a terminal-file drag |
+| Pointer movement below `POINTER_DRAG_START_PX` | Preserve the normal source-row click |
+| Pointer starts on a Git row action button | Preserve the action and do not begin a drag |
+| Drop over a registered terminal | Commit the payload, paste once, focus that terminal, and suppress file-panel project sync once |
+| Drop outside a terminal | Run the source's optional outside-drop behavior, then clear the in-memory drag |
+| Same local/WSL root | Paste the relative drag text |
+| Different local/WSL root or worktree | Paste the source absolute path |
+| Same SSH host and remote root | Paste the relative drag text |
+| Different SSH host or remote root | Paste the source remote absolute path |
+| Malformed custom payload | Ignore its metadata and fall back to legacy text data |
+| Empty source root | Keep the normalized relative path as the absolute-path fallback |
+
+#### 5. Good / Base / Bad Cases
+
+- Good: a modified or untracked Git file or directory from repository B is dropped into project A in a split pane and the terminal receives B's absolute path.
+- Base: a file or directory from the current project's file panel or Git Changes tree is dropped into another pane for the same project and keeps the existing relative CLI format, with a trailing slash for directories.
+- Bad: giving Git Changes its own pointer-drag implementation; source panels drift in threshold, preview, or terminal drop behavior.
+- Bad: resolving the path when the drag starts and storing only one string; the target pane cannot detect that the source and target roots differ.
+- Bad: comparing only project IDs; two worktrees or two SSH roots can have different filesystem locations while sharing a project identity.
+
+#### 6. Tests Required
+
+- Static regression test asserts all file explorer context-menu variants expose both copy actions.
+- Static regression test asserts file explorer and Git Changes both route through `useTerminalFilePointerDrag`, with Git rows excluding action buttons and suppressing a post-drag click.
+- Static regression test asserts the shared drag payload includes source context, absolute fallback data, and the custom MIME field.
+- Static regression test asserts terminal drop resolution uses project/worktree location comparison and absolute fallback.
+- `npx tsc --noEmit` must cover the payload, drop-zone callback, and i18n keys.
+- Manually verify file-explorer file/directory and Git file/directory drags (including modified and untracked trees) for same-project pane, cross-project pane, cross-worktree pane, local/WSL, SSH same-root, SSH different-root, and both `zh-CN`/`en-US` UI languages.
+
+#### 7. Wrong vs Correct
+
+```tsx
+// Wrong: Git Changes owns a second drag lifecycle and can drift from the file explorer.
+onPointerMove={() => beginTerminalFileDrag(payload)};
+
+// Correct: every source shares the payload, threshold, preview, and terminal commit contract.
+const drag = useTerminalFilePointerDrag({ project: gitTreeProject });
+onPointerDown={(event) => drag.handlePointerDown(event, { path: node.path, kind: "file" })};
+```
+
+### Convention: Terminal input selection state stays in the Input controller
+
+**What**: useTerminalInput.attachSelection() owns current-input selection state and its mouse listeners: select-all, Shift+Arrow expansion, Arrow collapse, selection deletion/replacement, and the disabled-by-default click-cursor path. XTermTerminal may route keyboard branches to the returned controller, but must not recreate its selection snapshots or cursor-range state.
+
+**Why**: Selection editing combines xterm viewport cells with the PTY line-editor sequence. Keeping its state inside Input prevents changes to display rendering, output buffering, or context-menu UI from silently changing selection semantics.
+
+**Correct**:
+
+    const selection = attachSelection(terminal, {
+      markAttentionInputHandled,
+      reportPtyWriteError,
+    });
+    inputDisposables.push({ dispose: selection.dispose });
+
+**Contracts**:
+
+- Create one controller per terminal attachment; its selection state must start empty and dispose() must remove its DOM listeners.
+- Input owns the current-input buffer and cursor index. Callers must use the controller API rather than passing or mutating those refs.
+- Use the existing terminalTextEditing and terminalCellWidth helpers for cursor indices and display cells. Do not approximate CJK/wide-character offsets with string length.
+- The shared TUI composer markers belong in src/features/terminal/lib/terminalTui.ts; selection and rendering import the same patterns instead of defining local copies.
+- forwardTerminalInput() consumes a replacement selection before writing to the PTY, then clears only the state required by the original input path.
+
+**Tests**: Run npx tsc --noEmit; manually verify Ctrl/Cmd+A, Shift+Left/Right, collapse with Left/Right, Backspace/Delete, typing to replace a selection, Ctrl/Cmd+C selection copy versus Ctrl+C interrupt, and switching sessions after a selection.
+
+### Convention: Pi terminal compatibility stays outside XTermTerminal
+
+**What**: Shared IME input-anchor parsing lives in `src/features/terminal/lib/terminalImeAnchor.ts`, while IME DOM events
+and composition lifecycle stay in `src/features/terminal/lib/terminalIme.ts`. Shared CLI context parsing lives in
+`src/features/terminal/browser/TerminalCliContext.ts`.
+Pi IME positioning, ANSI transformation, and diagnostics live in `TerminalPiIme.ts`,
+`TerminalPiAnsiTransform.ts`, and `TerminalPiDiagnostics.ts`. `TerminalPiCompatibility.ts` is only
+the facade/state coordinator. `XTermTerminal` supplies context and connects narrow callbacks.
+
+**Why**: Pi issue #177 crosses ConPTY, daemon transport, frontend normalization, xterm parsing, and
+rendering. Live diagnostics proved that the formal OSC 133 user-message block reaches the frontend,
+then disappears during OSC normalization. The integration scanner preserved each OSC sequence but
+failed to copy the ordinary text between two managed OSC sequences, leaving only the padded
+background row. `DECSET/DECRST 2026` filtering and viewport refresh do not fix this data loss.
+
+**Contracts**:
+
+- Recognize Pi only from the exact `pi` project/title tool or a startup command whose executable
+  token is `pi`, `pi.cmd`, `pi.exe`, or `pi.ps1`; strings such as `pip install pi` are unrelated.
+- Pi compatibility code may rewrite only exact built-in Pi tool-status background SGR sequences;
+  every other byte must be preserved.
+- OSC integration scanning must preserve the bytes before every recognized OSC sequence, including
+  ordinary CSI/text between consecutive OSC 133/633/7 sequences. Test every possible daemon-frame
+  split point around the sequence and message body.
+- Development diagnostics may observe raw frame, normalized text, and xterm write-commit state,
+  but must remain silent in production and for non-Pi sessions.
+- Diagnostic payloads must be bounded and must not persist complete terminal content.
+- `useTerminalDisplay` exposes only tool-neutral optional callbacks; Pi branching stays out of the
+  shared transport and write/ACK path.
+- `attachTerminalIme` resolves anchors in this order: shared fallback, optional CLI composition
+  correction, then optional helper-textarea correction. `.composition-view` uses the corrected input
+  row; only the helper textarea moves to a composer bottom border.
+- Pi recognizes an editor only between paired horizontal rules in the visible viewport. A rule may
+  contain Pi's scrolling hint between horizontal edges. A live buffer cursor inside that region wins;
+  otherwise only inverse cells inside the same region may act as the software cursor. Inverse status
+  cells outside a paired editor are invalid.
+- Terminal resize/reflow invalidates a frozen composition anchor before both Pi corrections run.
+- Outside composition, terminal resize must reapply the Pi helper-textarea resolver after xterm's own
+  `_syncTextArea()` write; the idle pin uses the same bottom-rule anchor as the active composition path.
+- Pi tool background normalization is a stateful pre-write CSI transform, never an xterm buffer
+  mutation. It replaces exact dark/light RGB status backgrounds with `SGR 49`, plus unambiguous
+  256-color fallbacks 22/52/255. Conflicting 17/254 values, foreground attributes, user/custom
+  backgrounds, OSC payloads, and non-target CSI sequences stay byte-for-byte unchanged.
+- Live output, daemon replay, and initial serialized snapshots use the same transformer instance.
+  Reset/dispose clears incomplete CSI state.
+
+```typescript
+interface PiTerminalCompatibility {
+  resolveImeCompositionAnchor(terminal: Terminal, anchor: TerminalImeAnchor): TerminalImeAnchor;
+  resolveImeTextareaAnchor(terminal: Terminal, anchor: TerminalImeAnchor): TerminalImeAnchor;
+  transformOutput(text: string): string;
+  reset(): void;
+}
+```
+
+**Cases**:
+
+- Good: paired Pi rules plus an in-region hardware/software cursor -> composition uses the input row
+  and only the helper textarea moves to the bottom rule.
+- Base: non-Pi session, unpaired rules, or no in-region cursor -> return the shared fallback without
+  buffer mutation.
+- Bad: touching xterm private `_line/loadCell/setCell` APIs or broadly clearing a rendered row.
+
+**Tests**: Run `node --test scripts/terminalImeAnchor.test.mjs scripts/terminalImeComposition.test.mjs scripts/terminalOsc.test.mjs scripts/terminalPiCompatibility.test.mjs`;
+assert Pi context detection, bounded summaries, production/non-Pi silence, OSC 10/11 filtering,
+byte-for-byte Pi message preservation at every frame split, separate IME anchors, RGB/256-color
+matching, reset behavior, preserved user/custom backgrounds, and foreground preservation.
+
+### Common Mistake: Letting xterm sync updates clear the screen while the user is reading scrollback
+
+**Symptom**: During Codex / Claude Code / Copilot-style TUI streaming, scrolling upward to inspect older output becomes impossible, or a later resize causes the current screen to be replayed into scrollback.
+
+**Cause**: Modern TUIs can wrap redraw bursts in `DECSET/DECRST 2026` sync-update blocks and emit `CSI 2 J` / `CSI 3 J` clears inside those bursts. In `@xterm/xterm` 6.x on embedded terminals, those clears can yank the viewport back to the live screen or amplify resize redraws, especially on Windows ConPTY.
+
+**Fix**: Keep the workaround in the frontend xterm stream path, not in the Rust PTY backend. Track whether the user has scrolled away from bottom, detect `\x1b[?2026h` / `\x1b[?2026l`, and while a sync-update block is active drop `CSI 2 J` / `CSI 3 J` only when preserving scrollback matters. Also defer opportunistic `fit()` calls until the sync-update block ends.
+
+**Correct**:
+
+```tsx
+if (
+  syncUpdateDepthRef.current > 0
+  && shouldPreserveViewportDuringSync()
+  && (sequence === "\x1b[2J" || sequence === "\x1b[3J")
+) {
+  continue;
+}
+```
+
+**Wrong**:
+
+```tsx
+// Do not globally strip screen-clearing sequences for every terminal frame.
+text = text.replace(/\x1b\[[23]J/g, "");
+```
+
+**Prevention**:
+
+- [ ] When terminal scrollback breaks only during agent/TUI streaming, inspect sync-update and clear-screen sequences before changing PTY/backend logic.
+- [ ] Scope clear-screen filtering to the "user is reading history" case; do not degrade normal at-bottom TUI redraw fidelity.
+- [ ] If resize is noisy during TUI streaming, prefer deferring `fit()` rather than rebuilding the terminal or forcing outer-container scroll resets.
+
+### Common Mistake: Misdiagnosing Claude Code scrollback duplication as a CLI-Manager rendering bug
+
+**Symptom**: While Claude Code streams output the live view looks correct, but scrolling up later reveals duplicated blocks in scrollback. The duplicate sits at a frame boundary: the tail rows of the previous frame (e.g. diff lines `147-149`) followed by the new frame reprinting from the same rows. Duplicates are stable (selectable, survive redraws), so they are real buffer content — not a WebGL/canvas artifact.
+
+**Cause** (investigated 2026-07-02): Upstream Claude Code bug, not ours. Its default inline (Ink) renderer leaves the old frame in scrollback and reprints a near-identical frame on relayout triggers (content crossing the viewport edge, spinner updates, SIGWINCH, Ctrl+O). Tracked upstream in anthropics/claude-code #53857, #46834, #52924, #52945, #51828 — reproduced on iTerm2, Terminal.app, VS Code, Windows Terminal across macOS/Linux/Windows, so the emulator is not the culprit. Our `scrollOnEraseInDisplay: true` amplifies the ED2-clear flavor of this (iTerm2-style "push erased screen into scrollback"), which is why duplicates can look worse here than in spec-conform terminals.
+
+**Fix**: Do not change CLI-Manager. Mitigate on the Claude Code side: set `"env": {"CLAUDE_CODE_NO_FLICKER": "1"}` in `~/.claude/settings.json` (more reliable on Windows than the `"tui": "fullscreen"` settings key), or run `/tui fullscreen` in-session. Both switch to alt-screen rendering, which never touches scrollback (at the cost of the native scrollbar).
+
+**Wrong**:
+
+```tsx
+// Do not remove this option to "fix" the duplication.
+const terminal = new Terminal({
+  // scrollOnEraseInDisplay: true,  <- removed
+});
+```
+
+Removing `scrollOnEraseInDisplay: true` is a worse regression: Codex repaints via explicit ED2+ED3, so without it Codex scrollback never grows at all (xtermjs/xterm.js#5745), and PowerShell/ConPTY loses history on clear — the exact problems commit `d15495d` (2026-06-08) introduced the option to solve.
+
+**Prevention**:
+
+- [ ] First classify: buffer-level duplication (stable when scrolled, selectable) vs. rendering artifact (vanishes on redraw). Frame-boundary duplicates during Claude Code sessions point upstream — do not start by auditing our renderer or PTY path.
+- [ ] Cross-check in Windows Terminal with the same CLI before blaming the embedded xterm.
+- [ ] Treat `scrollOnEraseInDisplay: true` + `windowsPty: { backend: "conpty" }` as a coupled pair with the trade-off documented above; any change must re-verify Codex scrollback growth and PowerShell `cls` history.
+
+### Convention: Light-theme hierarchy relies on contrast plus borders, not tint alone
+
+**What**: When polishing existing light-theme UI surfaces, selected and active states must combine three signals: darker text or icon contrast, a stronger edge (`border` or inset outline), and a surface step that is visibly different from hover. Do not rely on a near-white tint change alone.
+
+**Why**: Dense desktop-tool layouts compress tabs, tree rows, toolbar buttons, and side-panel shells into narrow bands. In light themes, subtle fills collapse visually into the base surface and make selection state hard to scan. Border and surface hierarchy improve readability without increasing spacing or introducing decorative gradients.
+
+**Example**:
+
+```css
+[data-theme="light"] .ui-tab-trigger[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--interactive-selected-border) 68%, transparent);
+  background-color: color-mix(in srgb, var(--primary) 12%, white 88%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--interactive-selected-border) 34%, transparent);
+}
+
+[data-theme="light"] .ui-tree-project[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--interactive-selected-border) 58%, transparent);
+  background: color-mix(in srgb, var(--primary) 13%, white 87%);
+}
+```
+
+**Wrong**:
+
+```css
+[data-theme="light"] .ui-tree-project[data-selected="true"] {
+  background: color-mix(in srgb, var(--primary) 5%, white 95%);
+  border-color: transparent;
+}
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually verify at least one light palette and one dark theme. In the light theme, check project-tree selection, terminal tabs, toolbar buttons, and terminal side-panel buttons are distinguishable at a glance without changing layout density.
+
+### Convention: Project CLI argument history records after every eligible successful save
+
+**What**: `ConfigModal` must use `CliArgsHistoryField` for both new and edit forms whenever a CLI tool is selected. Its query filters the current tool's complete history before applying the 10-item limit. After `createProject` or `updateProject` succeeds, record a non-empty `trimmedCliArgs` through the shared `!isClone` path; cloned projects remain excluded.
+
+**Why**: Separating history recording into only the create branch makes an edited project's arguments unavailable when the user subsequently creates another project. Recording after the persistence branch also prevents a failed save from inflating usage counts.
+
+**Correct**:
+
+```tsx
+if (!isClone && trimmedCliArgs) {
+  await recordCliArgsHistory(trimmedCliTool, trimmedCliArgs);
+}
+```
+
+**Wrong**:
+
+```tsx
+if (!isEdit && !isClone && trimmedCliArgs) {
+  await recordCliArgsHistory(trimmedCliTool, trimmedCliArgs);
+}
+```
+
+**Tests**: Run `npx tsc --noEmit` and `node --test scripts/cliArgsHistory.test.mjs`; assert the shared record block occurs after the edit/create persistence branch and before `onClose()`, and a query can find an item outside the unfiltered top 10 while its matching result remains limited to 10 entries.
+
+### Convention: Xterm-style hover scrollbars on non-xterm views use an overlay thumb
+
+**What**: A read-only transcript or other non-xterm view that must match the terminal scrollbar interaction should hide the browser-native scrollbar and render an absolutely positioned track/thumb. The scroll container remains the source of truth for `scrollTop`, `scrollHeight`, and wheel/touch scrolling; the overlay thumb mirrors those values and writes `scrollTop` only during drag.
+
+**Why**: `XTermTerminal` receives a real `.xterm-slider` from xterm.js, while a transcript's `overflow-y-auto` scrollbar is generated internally by WebView2/Chromium. Browser `::-webkit-scrollbar` hover behavior is platform-dependent and can change layout width, causing reflow and Pane jitter.
+
+For a third-party picker rendered in an open Shadow DOM, hide the browser-native scrollbar inside the shadow root, but render the absolutely positioned track/thumb in the stable React-owned host container (not inside the third-party root or its ShadowRoot). Position it from the real scroll container's bounding rect. Wheel/trackpad scrolling must remain owned by the scroll container; the overlay is only a visual indicator and drag target. If the picker is mounted imperatively, parent-provided callbacks must be read through refs so routine parent rerenders (for example popover/menu positioning) do not recreate the picker and reset category navigation or scroll position.
+
+**Correct**:
+
+```tsx
+<div className="relative min-h-0 flex-1">
+  <div ref={scrollRef} className="ui-terminal-native-scroll h-full overflow-y-auto">
+    {content}
+  </div>
+  <div className="ui-subagent-scrollbar" aria-hidden="true">
+    <div className="ui-subagent-scrollbar-thumb" onPointerDown={startThumbDrag} />
+  </div>
+</div>
+```
+
+**Wrong**:
+
+```css
+/* Do not rely on the browser scrollbar to behave like xterm's .xterm-slider. */
+.transcript::-webkit-scrollbar-thumb:hover {
+  width: 100%;
+}
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually verify the overlay thumb appears only when content overflows, starts narrow, expands on hover, follows wheel/trackpad scrolling, drags to the correct document position, and does not change the transcript Pane width or cause line-wrap jitter.
+
+### Convention: Terminal Markdown preview controls must remain terminal-themed and history-addressable
+
+**What**: The terminal Markdown preview uses the existing Radix Select primitive for historical answer selection. Its portal content must receive the terminal theme variables explicitly, and its viewport must use `ui-thin-scroll` with `--ui-scrollbar-thumb` / `--ui-scrollbar-track` from the terminal theme. Do not use a native `<select>` when the popup scrollbar or surface needs terminal styling.
+
+Every configured Agent CLI terminal keeps the right-top preview control visible.
+It can open when its `cliTool` or project tool resolves to a registered
+`HistorySource` and the session has a bound `cliSessionId`; this includes Pi's
+native `pi` history source. A missing source or session ID disables the control
+instead of hiding it. A current-turn Hook status is not a prerequisite because
+restored sessions may have no new Hook event. `Ctrl`/`Cmd` plus wheel changes
+the preview Markdown scale only within the preview content, clamped to
+`0.8`–`1.6`; an unmodified wheel must keep normal scrolling.
+
+KaTeX's package stylesheet owns the `.katex` base font size. Shared Markdown CSS may set its color, but must not force `.katex` to `font-size: 1em`, which makes terminal formulas smaller and visually soft. Preview zoom should scale the Markdown container instead of using transforms that introduce raster blur.
+
+**Correct**:
+
+```tsx
+<SelectPrimitive.Content style={terminalPreviewStyle}>
+  <SelectPrimitive.Viewport className="ui-thin-scroll overflow-y-auto" />
+</SelectPrimitive.Content>
+
+<div onWheel={handlePreviewWheel} style={{ "--markdown-preview-font-scale": scale }} />
+```
+
+**Wrong**:
+
+```tsx
+<select>{options}</select>
+<div onWheel={zoomEveryWheelEvent} />
+<style>.ui-markdown .katex { font-size: 1em; }</style>
+```
+
+**Tests**: Run `node --test scripts/terminalMarkdownPreview.test.mjs scripts/markdownRendering.test.mjs` and `npx tsc --noEmit`; manually verify long answer lists, keyboard selection, Pi and restored sessions without a new conversation, a configured CLI without a bound session ID, normal scrolling, `Ctrl`/`Cmd` wheel zoom limits, light/dark terminal themes, background images, and clear KaTeX formulas.
+
+### Convention: Settings pages fill the available content width and wrap controls
+
+**What**: A settings page rendered inside `SettingsLayout` should use the available content width instead of imposing a page-level fixed `max-width`. Card headers and action groups that contain labels, badges, or buttons must allow wrapping; internal grids should keep responsive column breakpoints.
+
+**Why**: A fixed page width leaves large unused areas on wide displays, while non-wrapping controls can overflow when the settings pane is narrow or the UI language is longer.
+
+**Correct**:
+
+```tsx
+<Stack gap="md" w="100%">
+  <Group justify="space-between" wrap="wrap" gap="sm">
+    <Text>{title}</Text>
+    <Group gap="xs" wrap="wrap">{actions}</Group>
+  </Group>
+</Stack>
+```
+
+**Wrong**:
+
+```tsx
+<Stack gap="md" maw={1040}>
+  <Group justify="space-between">
+    <Text>{title}</Text>
+    <Group gap="xs">{actions}</Group>
+  </Group>
+</Stack>
+```
+
+**Tests**: Run `npx tsc --noEmit`; manually verify the page at a wide window, a narrow window, and both `zh-CN` and `en-US`, checking that cards use the available width and headers/actions do not overflow.
+
+### Convention: Host SFTP panes use the bounded File Explorer listing contract
+
+**What**: The local side of the SSH Host attachment dialog is a local directory browser, not a
+second rendering of the upload queue. It starts at the platform Desktop directory, lists entries
+through the existing Rust `file_list_dir` command with the selected directory as `rootPath` and an
+empty `relativePath`, and uses the same `@baybreezy/file-extension-icon` material file/folder icons
+as `FileExplorerSidebar`. The remote side uses the same material icon contract. Both pane headers
+stay aligned and both listing viewports use a fixed height with their own overflow scrolling.
+
+**Contracts**:
+
+- Directory rows navigate into the child directory; the local path field, directory picker,
+  parent button, and refresh button all replace or reload the current local browsing root.
+- File rows add the resolved local path to the existing transfer queue. The queue remains the
+  source of truth for upload status and is independent from the currently browsed directory.
+- Local browsing does not wait for SSH Agent initialization. A local directory failure is shown in
+  the local pane and must not be converted into an SSH or remote-directory error.
+- The `file_list_dir` Rust command remains the filesystem boundary: it canonicalizes the supplied
+  absolute directory and returns bounded metadata only. Do not grant the WebView a broad
+  `@tauri-apps/plugin-fs` scope or read local file bytes in the dialog.
+- All local path controls and accessibility labels use the shared i18n keys in both `zh-CN` and
+  `en-US`; changing the UI language must not change the selected local path or queue.
+- The local and remote headers reserve the same height so their list boundaries align; a long
+  listing scrolls inside its fixed viewport instead of expanding the dialog.
+
+**Tests**: Run `npx tsc --noEmit` and `npm run build`; manually verify Desktop defaults and
+listing on Windows/macOS, empty/unavailable directories, nested navigation, parent/root boundary,
+manual and native directory selection, refresh after a filesystem change, multiple file selection,
+duplicate suppression, upload progress, and language switching.
+
+### Common Mistake: Leaving `@monaco-editor/react` fully controlled
+
+**Symptom**: While the user types quickly in a config editor, the caret suddenly jumps to the last
+line of the document, or characters land out of order (typing `12345` yields `"124"35`). Reported
+against the provider common-configuration editor (issue #241 follow-up).
+
+**Root cause**: `@monaco-editor/react` synchronises a controlled `value` by comparing it with
+`editor.getValue()`; on any mismatch it replaces the **full model range** with
+`forceMoveMarkers: true`, which collapses the selection to the end of the document. Monaco emits
+content changes from its own DOM listeners, so `onChange` -> `setState` is a default-lane React
+update. When the tree is busy — `NativeProviderSettingsPage` polls failover state every second —
+React can commit props that lag the model by several keystrokes. Every lagging commit rewrites the
+whole document: the caret is pushed to the end, and a caret restored against pre-replacement
+content makes the following keystrokes land at the wrong offset, which is what scrambles the text
+(auto-closed quotes make the misplacement obvious).
+
+**Rules for provider config editors** (`NativeProviderCodeEditor`, shared by common config,
+provider-specific config, the full-document editor, effective-config preview and header/body
+overrides):
+
+- Pass `defaultValue`, never `value`, to `<Editor>`. The library's built-in sync must stay inert;
+  this component owns the sync policy.
+- Queue every value emitted from `onChange` in order. When an incoming prop matches a queued
+  emission, acknowledge up to that entry and **never write the model** — the model already holds
+  that text or newer text the user just typed. Matching by queue (not by "the previous value")
+  is required: React batching can skip intermediate values and the lag is not bounded to one
+  keystroke. Cap the queue so a consumer that normalises the value cannot grow it without bound.
+- Any genuine external replacement (refresh, save write-back, provider/document switch, generated
+  config) must save and restore selections plus `scrollTop` / `scrollLeft` around the edit. Monaco
+  clamps out-of-range selections, so restoring is safe after the content shrinks.
+- Use `model.pushEditOperations`, not `editor.executeEdits`: read-only editors block
+  `executeEdits`, and the read-only preview surfaces must still refresh without losing scroll.
+- Suppress the `onChange` callback while applying an external value, otherwise consumers that track
+  dirty state mark themselves dirty on every refresh.
+- Keep the `options` object and the change handler referentially stable. An unstable `onChange`
+  makes the library dispose and re-subscribe `onDidChangeModelContent` on every render, which the
+  one-second failover poll would otherwise trigger every second.
+- Reset the emitted-value queue when `path` changes: a new `path` means a new (or cached) model,
+  and stale echo bookkeeping would suppress a legitimate content write.
+
+`FileEditorContent` still uses the plain controlled pattern. It has the same latent behaviour and
+must adopt the same policy if caret jumps are reported there.
+
+**Tests**: `npx tsc --noEmit`; manually hold a key in a long common configuration to confirm the
+caret stays in place and the characters keep their order, then verify refresh / save / provider
+switch / document switch still reload content and keep the viewport.
+
+## Realtime statistics image export
+
+The live statistics panel marks its scroll content with `data-stats-screenshot-scroll`; screenshot/refresh actions carry `data-stats-screenshot-exclude`. Export the currently enabled cards at the current panel width, including content below the viewport, without changing live layout or scroll position. Hidden cards and closed dialogs stay excluded.
+
+Snapshot computed styles (including inherited theme variables) and canvas pixels synchronously before asynchronous rendering. Expand only the offscreen scroll clone, and remove its inert/aria-hidden host in `finally`. Do not point the renderer at the terminal, the whole window or a different session after a tab switch. Use a proportional pixel budget rather than cropping.
+
+Ordinary captures use at least a 2x pixel ratio and may follow high-density displays up to 3x. Dimension and total-pixel limits may proportionally reduce extreme long captures so the full panel remains present without exceeding the renderer budget.
+
+`statsScreenshot` lazily loads html-to-image; `statsScreenshotClipboard` uses Tauri `Image.new` with explicit RGBA dimensions and `writeImage`, then closes the native resource in `finally`. The only added permission is clipboard-manager write-image. No filesystem export, upload or clipboard read is needed. The button owns its in-flight guard, disables duplicate clicks and localizes all feedback.
+
+Tests: `node --test scripts/statsScreenshot.test.mjs`; `node scripts/statsScreenshot.browser.mjs` produces a standalone file fixture whose `statsScreenshotTests.runScreenshotRegression()` exercises dark/light themes, three scroll positions, SVG/canvas, snapshot stability and cleanup. This fixture does not start CLI-Manager services or Tauri. A human must still verify pasting the image from the actual desktop app and switching UI language.
+
+## Convention: Pi fullscreen TUI external advisories use the shared output transform
+
+**What**: Pi-specific text emitted by an external extension through the PTY must be handled in
+`TerminalPiCompatibility.transformOutput`, which is shared by live output, replay, and restored
+snapshots. The incremental helper shape is
+`createPiOutputFilter(): { transform(text: string): string; reset(): void }`.
+
+**Why**: Pi's fullscreen renderer owns its redraw surface, while an extension's `console.warn`
+still enters the PTY as ordinary stderr. xterm cannot recover the composer after that text is
+written at the current cursor position. Filtering the one known advisory at the existing Pi
+compatibility boundary preserves the PTY transport and the user's configured direct tools.
+
+**Contracts**:
+
+- Match the complete `pi-mcp-adapter` direct-tools advisory, including a count of 75 or more and
+  its `\n` or `\r\n` terminator; do not filter arbitrary `MCP:` text.
+- Keep only a bounded candidate suffix while a PTY frame splits the advisory, and release a
+  candidate as ordinary output when it stops matching.
+- Keep non-Pi sessions byte-for-byte unchanged and clear the candidate on compatibility reset.
+
+**Correct**:
+
+```typescript
+const transformed = piActive
+  ? ansiTransform.transform(outputFilter.transform(text))
+  : text;
+```
+
+**Wrong**:
+
+```typescript
+text = text.replace(/MCP:.*/, "");
+```
+
+**Tests**: Assert every split point of the advisory, repeated advisories, nearby ordinary text,
+below-threshold and malformed MCP text, non-Pi passthrough, and reset after a partial candidate.
+Also keep the source contract that live, replay, and restore paths call the shared transform.
