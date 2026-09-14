@@ -12,6 +12,7 @@
 - 新增声明式 Pattern Runtime 初版，支持人工审批、任务步骤、轮次和 Agent 数量上限。
 - 新增本地 stdio Workbench MCP，向模型暴露任务创建、派发、进度、结果、查询和 checkpoint 工具。
 - 增加 child_task scope/criteria 校验与 evaluate_gate 工具，阻止越权或缺少验收标准的子任务。
+- 增加独立 daemon fixture 集成测试，验证真实 TCP/NDJSON 生命周期和隔离 discovery。
 
 ### 文件浏览器系统剪贴板粘贴
 

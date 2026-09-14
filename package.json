@@ -11,6 +11,7 @@
     "check:architecture": "node ./scripts/architecture.mjs",
     "test:workbench-isolation": "node ./scripts/workbenchIsolation.test.mjs",
     "test:daemon-adapter": "node --test orchestrator/test/cli-manager-daemon.test.mjs",
+    "test:daemon-fixture": "node --test orchestrator/test/daemon-fixture.integration.test.mjs",
     "test:task-registry": "node --test orchestrator/test/task-registry.test.mjs",
     "test:workbench-bridge": "node --test orchestrator/test/workbench-bridge.test.mjs",
     "test:pattern-runtime": "node --test orchestrator/test/pattern-runtime.test.mjs",
