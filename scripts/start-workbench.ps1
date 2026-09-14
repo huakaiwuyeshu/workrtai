@@ -2,11 +2,8 @@ param([switch]$SkipBuild)
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
+. $PSScriptRoot\workbench-env.ps1
 $env:CLI_MANAGER_DISTRIBUTION = "standalone"
-$env:WORKBENCH_REPO_ROOT = $repo
-$env:CLI_MANAGER_WORKBENCH_DATA_DIR = Join-Path $repo ".workbench"
-$cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
-if (Test-Path $cargoBin) { $env:Path = "$cargoBin;$env:Path" }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "未找到 Node.js 22+，请先安装 Node.js。" }
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "未找到 npm。" }
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw "未找到 Cargo/Rustup。" }

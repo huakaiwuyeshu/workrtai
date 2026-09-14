@@ -28,6 +28,7 @@ dist-ssr
 .claude/
 .worktrees/
 .workbench/
+.tooling/
 .agents/
 .codex/
 .xcodemap/
