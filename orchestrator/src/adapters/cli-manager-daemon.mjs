@@ -82,6 +82,11 @@ export class CliManagerDaemonAdapter {
     this.socket = undefined;
   }
 
+  async reconnect() {
+    this.disconnect();
+    return this.connect();
+  }
+
   #request(type, payload = {}) {
     if (!ALLOWED_REQUESTS.has(type)) throw new Error(`daemon_request_not_allowed:${type}`);
     return this.#requestRaw({ type, ...payload });

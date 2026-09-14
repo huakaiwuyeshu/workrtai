@@ -24,7 +24,7 @@
 | P8 | GUI 执行器 | P4、P7 | 浏览器子任务保存截图、日志、验证命令；桌面 GUI 作为独立适配器 |
 | P9 | 稳定性与发布 | P1-P8 | 重启恢复、并发/预算上限、失败知识、隐私检查、安装包和回滚手册 |
 
-## 当前迭代：P1 daemon adapter
+## 当前迭代：P1 daemon adapter（第一批已完成）
 
 本迭代只增加独立 sidecar 适配器和 fake-daemon 协议测试，不启动真实 daemon，不改变既有 CLI-Manager。实现范围：
 
@@ -33,6 +33,8 @@
 3. 白名单请求和主动事件解析。
 4. 协议版本/features 校验。
 5. 断线、超时、错误和重连后的输出回放接口。
+
+第一批已完成：adapter 已覆盖完整白名单生命周期、主动 `output/exit/hook_report` 事件、协议版本阻断、Session ID/写入参数校验和显式 reconnect；fake-daemon 测试共 3 项通过。下一批是接入本机 Workbench daemon 的真实 fixture，仍不连接现有 CLI-Manager daemon。
 
 完成 P1 后再进入 P2；在 P1 验收前，Bridge 不得创建真实 child Session。
 
