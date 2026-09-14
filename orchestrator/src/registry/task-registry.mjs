@@ -37,6 +37,11 @@ export class TaskRegistry {
         artifact_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id), kind TEXT NOT NULL,
         path TEXT, sha256 TEXT, content_json TEXT, description TEXT, created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS task_agents (
+        task_id TEXT NOT NULL REFERENCES tasks(task_id), session_ref TEXT NOT NULL,
+        cli_manager_session_id TEXT, concord_agent_id TEXT, role TEXT NOT NULL,
+        bound_at TEXT NOT NULL, unbound_at TEXT, PRIMARY KEY(task_id, session_ref)
+      );
       CREATE TABLE IF NOT EXISTS checkpoints (
         checkpoint_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, last_event_id TEXT NOT NULL,
         state_json TEXT NOT NULL, resumable INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
@@ -91,6 +96,12 @@ export class TaskRegistry {
     return artifactId;
   }
 
+  bindAgent(taskId, agent) {
+    this.#row(taskId);
+    this.db.prepare(`INSERT INTO task_agents (task_id,session_ref,cli_manager_session_id,concord_agent_id,role,bound_at) VALUES (?,?,?,?,?,?) ON CONFLICT(task_id,session_ref) DO UPDATE SET cli_manager_session_id=excluded.cli_manager_session_id, concord_agent_id=excluded.concord_agent_id, role=excluded.role, bound_at=excluded.bound_at, unbound_at=NULL`).run(taskId, agent.session_ref, agent.cli_manager_session_id ?? null, agent.concord_agent_id ?? null, agent.role, now());
+    return agent;
+  }
+
   checkpoint(runId, state, lastEventId = this.#lastEvent(runId)) {
     const checkpointId = id("checkpoint");
     this.db.prepare("INSERT INTO checkpoints (checkpoint_id,run_id,last_event_id,state_json,created_at) VALUES (?,?,?,?,?)").run(checkpointId, runId, lastEventId ?? "", json(state), now());
@@ -104,7 +115,8 @@ export class TaskRegistry {
     const children = this.db.prepare("SELECT task_id FROM tasks WHERE parent_task_id = ? ORDER BY created_at").all(taskId).map((child) => this.getTask(child.task_id).task);
     const events = this.db.prepare("SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at,event_id").all(taskId).map((event) => ({ ...event, payload: parse(event.payload_json) }));
     const artifacts = this.db.prepare("SELECT * FROM task_artifacts WHERE task_id = ? ORDER BY created_at").all(taskId).map((artifact) => ({ ...artifact, content: parse(artifact.content_json) }));
-    return { task, children, events, artifacts };
+    const agents = this.db.prepare("SELECT * FROM task_agents WHERE task_id = ? AND unbound_at IS NULL ORDER BY bound_at").all(taskId);
+    return { task, children, events, artifacts, agents };
   }
 
   #row(taskId) {
@@ -132,4 +144,3 @@ export class TaskRegistry {
     return this.db.prepare("SELECT e.event_id FROM task_events e JOIN tasks t ON t.task_id=e.task_id WHERE t.run_id=? ORDER BY e.created_at DESC LIMIT 1").get(runId)?.event_id ?? "";
   }
 }
-
