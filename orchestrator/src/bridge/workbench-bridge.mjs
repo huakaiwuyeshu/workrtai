@@ -14,6 +14,14 @@ export class WorkbenchBridge {
     return this.registry.createTask(input);
   }
 
+  createReviewTask({ title, assigned_cli, assigned_model, callback_agent_id, success_criteria = ["review_report"] }) {
+    return this.createTask({ type: "review_task", title, assigned_cli, assigned_model, callback_agent_id, allowed_paths: [], allowed_tools: ["read", "inspect"], success_criteria });
+  }
+
+  createChildTask(parentTaskId, input) {
+    return this.createTask({ ...input, type: "child_task", parent_task_id: parentTaskId });
+  }
+
   async dispatchTask(taskId) {
     const task = this.registry.getTask(taskId).task;
     if (!this.daemon) throw new Error("daemon_adapter_required");
@@ -34,6 +42,13 @@ export class WorkbenchBridge {
     const task = this.registry.getTask(taskId).task;
     if (!outcome.duplicate && task.callback_agent_id) await this.notify?.(task.callback_agent_id, { type: `task.${outcome.status}`, task_id: taskId, summary: result.summary, evidence: result.evidence ?? [] });
     return outcome;
+  }
+
+  scheduleTimeout(taskId, timeoutMs, reason = "child_task_timeout") {
+    const timer = setTimeout(() => {
+      try { this.registry.transition(taskId, "blocked", { reason }, `${taskId}:timeout`); } catch { /* task may already be terminal */ }
+    }, timeoutMs);
+    return () => clearTimeout(timer);
   }
 
   getTask(taskId) { return this.registry.getTask(taskId); }

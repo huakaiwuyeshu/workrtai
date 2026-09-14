@@ -36,7 +36,7 @@
 
 第一批已完成：adapter 已覆盖完整白名单生命周期、主动 `output/exit/hook_report` 事件、协议版本阻断、Session ID/写入参数校验和显式 reconnect；fake-daemon 测试共 3 项通过。第二批已完成：独立 daemon fixture 进程完成真实 TCP/NDJSON 生命周期集成测试，仍不连接现有 CLI-Manager daemon。
 
-P2 已开始：`TaskRegistry` 已实现 SQLite 初始化、任务父子图、状态转移、幂等 `postResult`、artifact、task_agents 和 checkpoint；`WorkbenchBridge` 已实现任务创建、daemon 派发、Agent 绑定、权限校验、质量门和一次性回调通知；本地 stdio Workbench MCP 已暴露任务生命周期工具。P5 的 Pattern Runtime 基础已开始，支持 approval、create、dispatch、wait、evaluate、synthesize 步骤及 Agent/轮次上限。Concord notifier 已加入 presence 检查、固定幂等键和不可达不改派规则。
+P2 已开始：`TaskRegistry` 已实现 SQLite 初始化、任务父子图、状态转移、幂等 `postResult`、artifact、task_agents 和 checkpoint；`WorkbenchBridge` 已实现任务创建、daemon 派发、Agent 绑定、权限校验、质量门和一次性回调通知；本地 stdio Workbench MCP 已暴露任务生命周期工具。P5 的 Pattern Runtime 基础已开始，支持 approval、create、dispatch、wait、evaluate、synthesize 步骤及 Agent/轮次上限。Concord notifier 已加入 presence 检查、固定幂等键和不可达不改派规则；Bridge 还提供显式 review_task/child_task、超时阻塞和质量门入口。
 
 完成 P1 后再进入 P2；在 P1 验收前，Bridge 不得创建真实 child Session。
 

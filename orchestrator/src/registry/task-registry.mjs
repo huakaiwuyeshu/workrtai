@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 
 const TERMINAL = new Set(["completed", "blocked", "failed", "cancelled"]);
 const TRANSITIONS = {
-  pending: new Set(["running", "cancelled"]),
+  pending: new Set(["running", "blocked", "cancelled"]),
   running: new Set(["review", "completed", "blocked", "failed", "cancelled"]),
   review: new Set(["running", "completed", "blocked", "failed", "cancelled"]),
 };

@@ -14,6 +14,7 @@
 - 增加 child_task scope/criteria 校验与 evaluate_gate 工具，阻止越权或缺少验收标准的子任务。
 - 增加独立 daemon fixture 集成测试，验证真实 TCP/NDJSON 生命周期和隔离 discovery。
 - 增加 Concord notifier，检查 promptable presence，使用稳定幂等键并禁止对不可达 Agent 自动改派。
+- 增加显式 review_task/child_task Bridge API 和超时 blocked 事件。
 
 ### 文件浏览器系统剪贴板粘贴
 
@@ -3417,3 +3418,4 @@ px tauri icon` 生成全尺寸）
 
 ## TEMP
 - Fix desktop terminal first-frame PTY subscription timing; add Web terminal scroll-to-bottom control and custom device removal confirmation.
+
