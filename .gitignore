@@ -27,6 +27,7 @@ dist-ssr
 .ace-tool/
 .claude/
 .worktrees/
+.workbench/
 .agents/
 .codex/
 .xcodemap/
